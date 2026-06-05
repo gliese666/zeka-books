@@ -1,0 +1,243 @@
+/**
+ * Pipeline orchestrator — processes ONE chapter end-to-end.
+ * Designed to run inside a single SSE request (≤ 300s on Vercel Pro).
+ *
+ * Emits structured events via a callback so the API route can stream them.
+ */
+
+import { extractEpubImages, extractEpubText } from '@/lib/extract/epub';
+import { extractPdfText } from '@/lib/extract/pdf';
+import { visionChunk } from '@/lib/ai/gemini';
+import { deepseekChunk, isStemSubject } from '@/lib/ai/deepseek';
+import { embedText } from '@/lib/ai/gemini';
+import { injectChunk, upsertChapterSession, getChapterSession } from '@/lib/supabase';
+import type { KarpathyChunk } from '@/lib/ai/deepseek';
+
+// ── Event types ───────────────────────────────────────────────────────────────
+
+export type PipelineEventType =
+  | 'extract_start' | 'extract_done'
+  | 'chunk_start' | 'chunk_done'
+  | 'embed_progress' | 'embed_done'
+  | 'supabase_inject'
+  | 'chapter_done'
+  | 'chapter_skip'
+  | 'retrying'
+  | 'error';
+
+export interface PipelineEvent {
+  type: PipelineEventType;
+  msg: string;
+  data?: Record<string, unknown>;
+}
+
+export type EmitFn = (event: PipelineEvent) => void;
+
+// ── Chapter params ─────────────────────────────────────────────────────────────
+
+export interface ChapterParams {
+  bookName: string;
+  subject: string;
+  chapterTitle: string;
+  chapterIndex: number;
+  pageStart: number;
+  pageEnd: number;
+  fileBuffer: Buffer;
+  fileType: 'epub' | 'pdf';
+  isImageBased: boolean;
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+export async function processChapter(
+  params: ChapterParams,
+  emit: EmitFn
+): Promise<{ chunks: number; skipped: boolean }> {
+  const { bookName, subject, chapterTitle, chapterIndex } = params;
+
+  // ── 1. Check checkpoint ───────────────────────────────────────────────────
+  const existing = await getChapterSession(bookName, chapterIndex);
+  if (existing?.status === 'done') {
+    emit({ type: 'chapter_skip', msg: `Глава ${chapterIndex} уже обработана (${existing.chunks_count} чанков) — пропускаем`, data: { chunks: existing.chunks_count } });
+    return { chunks: existing.chunks_count, skipped: true };
+  }
+
+  // Mark as processing
+  await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'processing');
+
+  try {
+    // ── 2. Extract ────────────────────────────────────────────────────────────
+    emit({ type: 'extract_start', msg: `Извлечение стр. ${params.pageStart}–${params.pageEnd} (${params.pageEnd - params.pageStart + 1} стр.)` });
+
+    let chunks: KarpathyChunk[] = [];
+    const useStem = isStemSubject(subject);
+
+    if (params.isImageBased) {
+      // Image-based: extract images
+      const images = params.fileType === 'epub'
+        ? await extractEpubImages(params.fileBuffer, params.pageStart, params.pageEnd)
+        : [];
+
+      if (!images.length) {
+        throw new Error(`Не найдено изображений для стр. ${params.pageStart}–${params.pageEnd}`);
+      }
+
+      emit({ type: 'extract_done', msg: `Найдено ${images.length} изображений (${Math.round(images.reduce((s, i) => s + i.data.length, 0) / 1024)}KB)` });
+
+      // ── 3. Chunk (Vision) ──────────────────────────────────────────────────
+      emit({ type: 'chunk_start', msg: useStem ? 'DeepSeek V4 Pro (точные науки)...' : 'Gemini 3.5-Flash Vision OCR + Karpathy...' });
+
+      if (useStem) {
+        // For STEM image-based: use Vision to get text first, then DeepSeek
+        const textFromVision = await extractTextViaVision(chapterTitle, images);
+        chunks = await deepseekChunk(chapterTitle, textFromVision, (msg) =>
+          emit({ type: 'retrying', msg })
+        );
+      } else {
+        chunks = await visionChunk(chapterTitle, images, (msg) =>
+          emit({ type: 'retrying', msg })
+        );
+      }
+
+    } else {
+      // Text-based: extract text
+      const rawText = params.fileType === 'epub'
+        ? await extractEpubText(params.fileBuffer, params.pageStart, params.pageEnd)
+        : await extractPdfText(params.fileBuffer, params.pageStart, params.pageEnd);
+
+      emit({ type: 'extract_done', msg: `Извлечено ${rawText.length} символов` });
+
+      // ── 3. Chunk (DeepSeek or Gemini) ─────────────────────────────────────
+      emit({ type: 'chunk_start', msg: useStem ? 'DeepSeek V4 Pro (точные науки)...' : 'Gemini 3.5-Flash (гуманитарные)...' });
+
+      if (useStem) {
+        chunks = await deepseekChunk(chapterTitle, rawText, (msg) =>
+          emit({ type: 'retrying', msg })
+        );
+      } else {
+        // Text-based humanities: use Gemini chat (no images)
+        chunks = await geminiTextChunk(chapterTitle, rawText, (msg) =>
+          emit({ type: 'retrying', msg })
+        );
+      }
+    }
+
+    emit({ type: 'chunk_done', msg: `Получено ${chunks.length} чанков`, data: { count: chunks.length } });
+
+    if (!chunks.length) {
+      throw new Error('Ни одного чанка не получено — возможно ответ от AI пуст');
+    }
+
+    // ── 4. Embed + Inject ──────────────────────────────────────────────────────
+    let injected = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const embedText_str = buildEmbedText(chunk);
+
+      emit({ type: 'embed_progress', msg: `Эмбеддинг ${i + 1}/${chunks.length}: "${chunk.title.slice(0, 40)}"`, data: { current: i + 1, total: chunks.length } });
+
+      const [vec768, vec3072] = await Promise.all([
+        embedText(embedText_str, 768),
+        embedText(embedText_str, 3072),
+      ]);
+
+      await injectChunk(subject, chapterTitle, chunk, vec768, vec3072);
+      injected++;
+
+      // Small pause to respect rate limits
+      if (i < chunks.length - 1) await sleep(800);
+    }
+
+    emit({ type: 'embed_done', msg: `${injected} чанков записано в Supabase` });
+
+    // ── 5. Mark done ───────────────────────────────────────────────────────────
+    await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'done', injected);
+    emit({ type: 'chapter_done', msg: `✅ Глава ${chapterIndex} завершена: ${injected} чанков`, data: { chunks: injected } });
+
+    return { chunks: injected, skipped: false };
+
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'error', 0, errMsg);
+    emit({ type: 'error', msg: `❌ Ошибка: ${errMsg}` });
+    throw err;
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function buildEmbedText(chunk: KarpathyChunk): string {
+  let extra = '';
+  if (chunk.key_figures?.length) extra += ' | figures: ' + chunk.key_figures.slice(0, 3).join('; ');
+  if (chunk.key_dates?.length) extra += ' | dates: ' + chunk.key_dates.slice(0, 5).join('; ');
+  if (chunk.misconceptions?.length) extra += ' | misconceptions: ' + chunk.misconceptions.slice(0, 2).join('; ');
+  if (chunk.prerequisites?.length) extra += ' | prerequisites: ' + chunk.prerequisites.slice(0, 2).join('; ');
+  return `title: ${chunk.title} | text: ${chunk.content.slice(0, 3000)}${extra}`;
+}
+
+async function extractTextViaVision(
+  chapterTitle: string,
+  images: import('@/lib/extract/epub').PageImage[]
+): Promise<string> {
+  // Use Gemini Vision just for OCR (extract text only, no chunking)
+  const GEMINI_KEY = process.env.GEMINI_API_KEY!;
+  const parts = [
+    { text: 'Прочитай текст со всех изображений и верни только plain text (без форматирования), сохраняя структуру страниц.\n\n' },
+    ...images.map(img => ({
+      inline_data: { mime_type: img.mimeType, data: img.data.toString('base64') },
+    })),
+    { text: 'Верни только текст страниц.' },
+  ];
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts }] }),
+      signal: AbortSignal.timeout(120_000),
+    }
+  );
+
+  if (!res.ok) throw new Error(`Vision OCR failed: ${res.status}`);
+  const data = await res.json();
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+}
+
+async function geminiTextChunk(
+  chapterTitle: string,
+  rawText: string,
+  statusCb?: (msg: string) => void
+): Promise<KarpathyChunk[]> {
+  const GEMINI_KEY = process.env.GEMINI_API_KEY!;
+  const SYSTEM = `Ты — эксперт-компилятор знаний для сократического AI-репетитора (метод Карпаты).
+Преобразуй текст главы в автономные wiki-чанки.
+Каждый чанк: title, content (## Контекст/## Суть/## Детали), concepts, key_figures, key_dates, misconceptions, prerequisites, difficulty 1-5, bloom_level, concept_type.
+Выведи ТОЛЬКО JSON с массивом "chunks".`;
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: SYSTEM + '\n\n---\n\n' + rawText.slice(0, 30000) }] }],
+        generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 16000 },
+      }),
+      signal: AbortSignal.timeout(180_000),
+    }
+  );
+
+  if (!res.ok) {
+    statusCb?.(`⚠️ Gemini text chunk failed: ${res.status}`);
+    return [];
+  }
+
+  const data = await res.json();
+  const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  const clean = text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+  const parsed = JSON.parse(clean);
+  return (parsed?.chunks ?? []).filter((c: KarpathyChunk) => c.title && c.content?.length >= 200);
+}
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
