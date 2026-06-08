@@ -133,7 +133,8 @@ export default function HomePage() {
   // ── Process chapters sequentially ──────────────────────────────────────────
 
   const processChapters = useCallback(async (startFromIdx?: number) => {
-    if (!uploadResult || !uploadedFile) return;
+    if (!uploadResult) return;
+    if (!uploadedFile && !uploadResult.filePath) return; // need either uploaded file or local path
     setIsProcessing(true);
 
     const chapters = uploadResult.chapters;
@@ -274,7 +275,11 @@ export default function HomePage() {
             {/* Left column */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
 
-              <BookUploader onUpload={handleUpload} isLoading={isUploading} />
+              <BookUploader
+                onUpload={handleUpload}
+                isLoading={isUploading}
+                activeFilePath={uploadResult?.filePath}
+              />
 
               {uploadResult && (
                 <ChapterList
@@ -295,38 +300,49 @@ export default function HomePage() {
 
               {/* Stats card */}
               {uploadResult && (
-                <div className="card" style={{ padding: 20 }}>
-                  <p style={{ fontSize: 14, color: 'var(--body)', marginBottom: 8 }}>Обрабатывается</p>
-                  <p style={{ fontWeight: 600, fontSize: 16, marginBottom: 16 }}>{uploadResult.subject}</p>
-
-                  <div style={{ display: 'flex', gap: 24, marginBottom: 16 }}>
-                    <div>
-                      <p className="caption-sm">Глав</p>
-                      <p style={{ fontWeight: 600 }}>{uploadResult.chapters.length}</p>
-                    </div>
-                    <div>
-                      <p className="caption-sm">Чанков</p>
-                      <p style={{ fontWeight: 600, color: 'var(--terminal-green)' }}>{totalChunks}</p>
-                    </div>
-                    <div>
-                      <p className="caption-sm">Формат</p>
-                      <p style={{ fontWeight: 600, textTransform: 'uppercase', fontSize: 12 }}>
-                        {uploadResult.fileType} · {uploadResult.isImageBased ? 'Image' : 'Text'}
-                      </p>
-                    </div>
+                <div className="card" style={{ padding: '16px 20px' }}>
+                  {/* Header row */}
+                  <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 12 }}>
+                    <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+                      {uploadResult.subject}
+                    </span>
+                    <span style={{
+                      fontSize: 11, fontWeight: 500, letterSpacing: '0.05em', textTransform: 'uppercase',
+                      color: 'var(--mute)',
+                    }}>
+                      {uploadResult.fileType} · {uploadResult.isImageBased ? 'image' : 'text'}
+                    </span>
                   </div>
 
+                  {/* Stats row */}
+                  <div style={{ display: 'flex', gap: 0, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--hairline)' }}>
+                    {[
+                      { label: 'Глав', value: uploadResult.chapters.length, color: 'var(--ink)' },
+                      { label: 'Чанков', value: totalChunks, color: 'var(--terminal-green)' },
+                      { label: 'Страниц', value: uploadResult.totalPages, color: 'var(--ink)' },
+                    ].map((stat, i) => (
+                      <div key={stat.label} style={{
+                        flex: 1, padding: '10px 0', textAlign: 'center',
+                        borderRight: i < 2 ? '1px solid var(--hairline)' : 'none',
+                        background: 'var(--surface-soft)',
+                      }}>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: stat.color, lineHeight: 1 }}>{stat.value}</div>
+                        <div style={{ fontSize: 11, color: 'var(--mute)', marginTop: 3 }}>{stat.label}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Processing progress (only shown while active) */}
                   {isProcessing && currentChapter && (
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                        <span className="caption-sm">Глава {currentChapter}/{uploadResult.chapters.length}</span>
-                        <span className="caption-sm">{Math.round((currentChapter / uploadResult.chapters.length) * 100)}%</span>
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+                        <span style={{ fontSize: 12, color: 'var(--body)' }}>Глава {currentChapter} / {uploadResult.chapters.length}</span>
+                        <span style={{ fontSize: 12, color: 'var(--body)', fontWeight: 500 }}>
+                          {Math.round((currentChapter / uploadResult.chapters.length) * 100)}%
+                        </span>
                       </div>
                       <div className="progress-track">
-                        <div
-                          className="progress-fill"
-                          style={{ width: `${(currentChapter / uploadResult.chapters.length) * 100}%` }}
-                        />
+                        <div className="progress-fill" style={{ width: `${(currentChapter / uploadResult.chapters.length) * 100}%` }} />
                       </div>
                     </div>
                   )}

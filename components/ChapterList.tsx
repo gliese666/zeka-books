@@ -30,11 +30,11 @@ const STATUS_ICON: Record<string, string> = {
 };
 
 const STATUS_COLOR: Record<string, string> = {
-  done: '#27c93f',
+  done: 'var(--terminal-green)',
   pending: 'var(--body)',
   processing: '#ffbd2e',
   error: '#ff5f56',
-  skip: 'var(--body)',
+  skip: 'var(--mute)',
 };
 
 export default function ChapterList({
@@ -48,49 +48,39 @@ export default function ChapterList({
   totalChunks,
 }: Props) {
   const doneCount = Object.values(chapterStatuses).filter((s) => s === 'done').length;
+  const allDone = chapters.length > 0 && doneCount === chapters.length;
   const progressPct = chapters.length > 0 ? (doneCount / chapters.length) * 100 : 0;
 
   return (
-    <div className="card" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+    <div className="card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-        <h2 style={{ fontSize: '16px', fontWeight: 600, color: 'var(--primary)', margin: 0 }}>
-          Главы
-        </h2>
-        <span
-          style={{
-            fontSize: '12px',
-            background: 'var(--hairline)',
-            borderRadius: '999px',
-            padding: '2px 10px',
-            color: 'var(--body)',
-          }}
-        >
-          {chapters.length}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <h2 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--primary)', margin: 0 }}>Главы</h2>
+          <span style={{ fontSize: 12, background: 'var(--hairline)', borderRadius: 9999, padding: '1px 9px', color: 'var(--body)' }}>
+            {chapters.length}
+          </span>
+        </div>
+        <span style={{ fontSize: 12, color: allDone ? 'var(--terminal-green)' : 'var(--mute)', fontWeight: allDone ? 600 : 400 }}>
+          {allDone ? `✓ ${totalChunks} чанков` : `${doneCount}/${chapters.length} · ${totalChunks} чанков`}
         </span>
       </div>
 
-      {/* Progress summary */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-        <span style={{ fontSize: '13px', color: 'var(--body)' }}>
-          {doneCount}/{chapters.length} глав · {totalChunks} чанков total
-        </span>
-        <div className="progress-track">
-          <div
-            className="progress-fill"
-            style={{ width: `${progressPct}%`, transition: 'width 0.3s ease' }}
-          />
-        </div>
+      {/* Progress bar */}
+      <div className="progress-track">
+        <div className="progress-fill" style={{ width: `${progressPct}%` }} />
       </div>
 
       {/* Action buttons */}
-      <div style={{ display: 'flex', gap: '8px' }}>
+      <div style={{ display: 'flex', gap: 8 }}>
         <button
           className="btn-primary"
           onClick={onProcess}
           disabled={isProcessing || chapters.length === 0}
+          style={{ flex: 1 }}
         >
-          ▶ Обработать всё
+          {isProcessing ? '⏳ Обработка...' : '▶ Обработать всё'}
         </button>
         <button
           className="btn-secondary"
@@ -102,23 +92,15 @@ export default function ChapterList({
       </div>
 
       {/* Chapter list */}
-      <div
-        style={{
-          maxHeight: '400px',
-          overflowY: 'auto',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
+      <div style={{ maxHeight: 380, overflowY: 'auto', marginRight: -4, paddingRight: 4 }}>
         {chapters.length === 0 ? (
-          <span style={{ fontSize: '13px', color: 'var(--body)', padding: '12px 0' }}>
-            Главы появятся после загрузки книги
-          </span>
+          <span style={{ fontSize: 13, color: 'var(--mute)' }}>Выберите книгу из Books Labs</span>
         ) : (
           chapters.map((chapter, i) => {
-            const status = chapterStatuses[i] ?? 'pending';
-            const isCurrent = currentChapter === i;
-            const chunks = chunkCounts[i];
+            const idx1 = i + 1; // statuses stored with 1-based keys
+            const status = chapterStatuses[idx1] ?? 'pending';
+            const isCurrent = currentChapter === idx1;
+            const chunks = chunkCounts[idx1];
 
             return (
               <div
@@ -127,60 +109,52 @@ export default function ChapterList({
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '10px',
-                  padding: '10px 0',
+                  gap: 10,
+                  padding: '9px 0',
+                  paddingLeft: isCurrent ? 10 : 0,
                   borderLeft: isCurrent ? '3px solid var(--primary)' : '3px solid transparent',
-                  paddingLeft: isCurrent ? '10px' : '0',
-                  transition: 'border-color 0.2s',
+                  transition: 'all 0.2s',
+                  background: isCurrent ? 'rgba(0,0,0,0.02)' : 'transparent',
+                  borderRadius: isCurrent ? '0 6px 6px 0' : 0,
                 }}
               >
                 {/* Status icon */}
-                <span
-                  style={{
-                    fontSize: '16px',
-                    flexShrink: 0,
-                    display: 'inline-block',
-                    animation: status === 'processing' ? 'spin 1s linear infinite' : 'none',
-                  }}
-                >
+                <span style={{
+                  fontSize: 14, flexShrink: 0,
+                  display: 'inline-block',
+                  animation: status === 'processing' ? 'spin 1s linear infinite' : 'none',
+                }}>
                   {STATUS_ICON[status] ?? '⏳'}
                 </span>
 
                 {/* Title + pages */}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    style={{
-                      fontSize: '13px',
-                      fontWeight: isCurrent ? 600 : 400,
-                      color: STATUS_COLOR[status],
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                    title={chapter.title}
-                  >
-                    {chapter.title.length > 50
-                      ? chapter.title.slice(0, 50) + '…'
-                      : chapter.title}
+                  <div style={{
+                    fontSize: 13,
+                    fontWeight: isCurrent ? 600 : 400,
+                    color: isCurrent ? 'var(--ink)' : STATUS_COLOR[status],
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }} title={chapter.title}>
+                    {chapter.title}
                   </div>
-                  <div style={{ fontSize: '12px', color: 'var(--body)' }}>
+                  <div style={{ fontSize: 11, color: 'var(--mute)', marginTop: 1 }}>
                     стр. {chapter.pageStart}–{chapter.pageEnd}
                   </div>
                 </div>
 
-                {/* Chunk count */}
+                {/* Chunk count badge */}
                 {status === 'done' && chunks !== undefined && (
-                  <span
-                    style={{
-                      fontSize: '12px',
-                      color: '#27c93f',
-                      background: '#f0fdf4',
-                      borderRadius: '999px',
-                      padding: '2px 8px',
-                      flexShrink: 0,
-                    }}
-                  >
-                    {chunks} чанков
+                  <span style={{
+                    fontSize: 11, fontWeight: 500,
+                    color: 'var(--terminal-green)',
+                    background: 'rgba(39,201,63,0.1)',
+                    borderRadius: 9999,
+                    padding: '2px 7px',
+                    flexShrink: 0,
+                  }}>
+                    {chunks}
                   </span>
                 )}
               </div>

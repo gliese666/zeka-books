@@ -94,7 +94,7 @@ html, body {
 .terminal-card {
   background: var(--surface-dark);
   border-radius: var(--radius-lg);
-  padding: 16px;
+  overflow: hidden;
   font-family: var(--font-mono); font-size: 13px;
   color: var(--on-dark);
 }
@@ -116,7 +116,7 @@ html, body {
 
 /* Progress */
 .progress-track { height: 4px; background: var(--hairline); border-radius: 99px; overflow: hidden; }
-.progress-fill  { height: 100%; background: var(--primary); border-radius: 99px; transition: width 0.3s; }
+.progress-fill  { height: 100%; background: var(--terminal-green); border-radius: 99px; transition: width 0.4s ease; }
 
 /* Chapter item */
 .chapter-item {

@@ -15,11 +15,12 @@ interface LocalBook {
 interface Props {
   onUpload: (file: File | null, subject: string, filePath?: string) => void;
   isLoading: boolean;
+  activeFilePath?: string; // currently selected/loaded book
 }
 
 type Tab = 'local' | 'upload';
 
-export default function BookUploader({ onUpload, isLoading }: Props) {
+export default function BookUploader({ onUpload, isLoading, activeFilePath }: Props) {
   const [tab, setTab] = useState<Tab>('local');
   const [subject, setSubject] = useState('');
   const [dragOver, setDragOver] = useState(false);
@@ -38,7 +39,7 @@ export default function BookUploader({ onUpload, isLoading }: Props) {
       .finally(() => setLoadingBooks(false));
   }, []);
 
-  // ── Upload tab handlers ──────────────────────────────────────────────────────
+  // ── Upload tab handlers ─────────────────────────────────────────────────────
 
   const handleFile = (file: File) => {
     if (!file) return;
@@ -58,104 +59,117 @@ export default function BookUploader({ onUpload, isLoading }: Props) {
   const handleDragLeave = () => setDragOver(false);
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; if (file) handleFile(file); };
   const handleZoneClick = () => { if (!isLoading) inputRef.current?.click(); };
-
   const handleUploadClick = () => {
     if (!selectedFile || !subject.trim() || isLoading) return;
     onUpload(selectedFile, subject.trim());
   };
 
-  // ── Local tab handlers ───────────────────────────────────────────────────────
+  // ── Local tab handlers ──────────────────────────────────────────────────────
 
   const handleLocalSelect = (book: LocalBook) => {
     if (isLoading) return;
     onUpload(null, book.subject, book.filePath);
   };
 
+  const title = tab === 'local' ? '📚 Books Labs' : '☁️ Загрузить файл';
+
   return (
-    <div className="card" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      <h2 style={{ fontSize: '16px', fontWeight: 600, color: 'var(--primary)', margin: 0 }}>
-        Загрузить книгу
+    <div className="card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      <h2 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--primary)', margin: 0 }}>
+        {title}
       </h2>
 
       {/* Tab switcher */}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button
-          onClick={() => setTab('local')}
-          style={{
-            flex: 1, padding: '8px 0', borderRadius: 9999, fontSize: 13, fontWeight: 500,
-            border: tab === 'local' ? '1.5px solid var(--primary)' : '1px solid var(--hairline)',
-            background: tab === 'local' ? 'var(--primary)' : 'var(--surface-soft)',
-            color: tab === 'local' ? '#fff' : 'var(--body)',
-            cursor: 'pointer',
-          }}
-        >
-          📚 Books Labs
-        </button>
-        <button
-          onClick={() => setTab('upload')}
-          style={{
-            flex: 1, padding: '8px 0', borderRadius: 9999, fontSize: 13, fontWeight: 500,
-            border: tab === 'upload' ? '1.5px solid var(--primary)' : '1px solid var(--hairline)',
-            background: tab === 'upload' ? 'var(--primary)' : 'var(--surface-soft)',
-            color: tab === 'upload' ? '#fff' : 'var(--body)',
-            cursor: 'pointer',
-          }}
-        >
-          ☁️ Загрузить файл
-        </button>
+      <div style={{ display: 'flex', gap: 6, background: 'var(--surface-soft)', borderRadius: 9999, padding: 3 }}>
+        {(['local', 'upload'] as Tab[]).map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            style={{
+              flex: 1, padding: '6px 0', borderRadius: 9999, fontSize: 13, fontWeight: 500,
+              border: 'none',
+              background: tab === t ? '#fff' : 'transparent',
+              color: tab === t ? 'var(--ink)' : 'var(--body)',
+              boxShadow: tab === t ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+              cursor: 'pointer',
+              transition: 'all 0.15s',
+            }}
+          >
+            {t === 'local' ? '📚 Books Labs' : '☁️ Загрузить'}
+          </button>
+        ))}
       </div>
 
       {/* ── LOCAL TAB ── */}
       {tab === 'local' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {loadingBooks ? (
-            <p style={{ fontSize: 13, color: 'var(--mute)', textAlign: 'center', padding: '16px 0' }}>
-              Загрузка книг...
+            <p style={{ fontSize: 13, color: 'var(--mute)', textAlign: 'center', padding: '20px 0', margin: 0 }}>
+              Загрузка списка книг...
             </p>
           ) : localBooks.length === 0 ? (
-            <p style={{ fontSize: 13, color: 'var(--mute)', textAlign: 'center', padding: '16px 0' }}>
-              Books Labs пуст или сайт открыт не локально.<br />
-              <span style={{ fontSize: 12 }}>Запусти <code>npm run dev</code> и открой localhost:3000</span>
-            </p>
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <p style={{ fontSize: 13, color: 'var(--mute)', margin: '0 0 4px' }}>Books Labs пуст</p>
+              <p style={{ fontSize: 12, color: 'var(--mute)', margin: 0 }}>
+                Запусти <code style={{ background: 'var(--hairline)', padding: '1px 5px', borderRadius: 4 }}>npm run dev</code> и открой localhost:3000
+              </p>
+            </div>
           ) : (
-            localBooks.map(book => (
-              <div
-                key={book.filePath}
-                onClick={() => handleLocalSelect(book)}
-                style={{
-                  padding: '12px 14px',
-                  borderRadius: 12,
-                  border: '1px solid var(--hairline)',
-                  cursor: isLoading ? 'not-allowed' : 'pointer',
-                  background: 'var(--surface-soft)',
-                  opacity: isLoading ? 0.5 : 1,
-                  transition: 'border-color 0.15s',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: 8,
-                }}
-                onMouseEnter={e => { if (!isLoading) (e.currentTarget as HTMLElement).style.borderColor = 'var(--primary)'; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--hairline)'; }}
-              >
-                <div>
-                  <p style={{ fontSize: 14, fontWeight: 500, margin: 0 }}>{book.folder}</p>
-                  <p style={{ fontSize: 12, color: 'var(--body)', margin: '2px 0 0' }}>
-                    {book.fileName} · {book.sizeMb} MB
-                  </p>
+            localBooks.map(book => {
+              const isActive = activeFilePath === book.filePath;
+              const isCurrentlyLoading = isLoading && isActive;
+              return (
+                <div
+                  key={book.filePath}
+                  onClick={() => handleLocalSelect(book)}
+                  style={{
+                    padding: '11px 14px',
+                    borderRadius: 10,
+                    border: isActive
+                      ? '1.5px solid var(--terminal-green)'
+                      : '1px solid var(--hairline)',
+                    cursor: isLoading ? (isActive ? 'wait' : 'not-allowed') : 'pointer',
+                    background: isActive ? 'rgba(39,201,63,0.04)' : 'var(--surface-soft)',
+                    opacity: isLoading && !isActive ? 0.45 : 1,
+                    transition: 'all 0.15s',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 10,
+                  }}
+                  onMouseEnter={e => {
+                    if (!isLoading && !isActive)
+                      (e.currentTarget as HTMLElement).style.borderColor = 'var(--primary)';
+                  }}
+                  onMouseLeave={e => {
+                    if (!isActive)
+                      (e.currentTarget as HTMLElement).style.borderColor = 'var(--hairline)';
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <p style={{ fontSize: 13, fontWeight: isActive ? 600 : 500, margin: 0, color: isActive ? 'var(--ink)' : 'var(--ink)' }}>
+                      {book.folder}
+                    </p>
+                    <p style={{ fontSize: 11, color: 'var(--mute)', margin: '2px 0 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {book.fileName} · {book.sizeMb} MB
+                    </p>
+                  </div>
+                  <div style={{ flexShrink: 0 }}>
+                    {isCurrentlyLoading ? (
+                      <span style={{ fontSize: 11, color: 'var(--mute)' }}>⏳</span>
+                    ) : (
+                      <span style={{
+                        fontSize: 11, borderRadius: 9999, padding: '2px 8px', fontWeight: 500,
+                        background: book.ragReadyCount > 0 ? 'rgba(39,201,63,0.12)' : 'var(--hairline)',
+                        color: book.ragReadyCount > 0 ? 'var(--terminal-green)' : 'var(--mute)',
+                      }}>
+                        {book.ragReadyCount > 0 ? `${book.ragReadyCount} чанков` : 'Не обработана'}
+                      </span>
+                    )}
+                  </div>
                 </div>
-                <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                  <span style={{
-                    fontSize: 11, borderRadius: 9999, padding: '2px 8px',
-                    background: book.ragReadyCount > 0 ? 'rgba(39,201,63,0.12)' : 'var(--hairline)',
-                    color: book.ragReadyCount > 0 ? 'var(--terminal-green)' : 'var(--mute)',
-                    fontWeight: 500,
-                  }}>
-                    {book.ragReadyCount > 0 ? `${book.ragReadyCount} глав готово` : 'Не обработана'}
-                  </span>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       )}

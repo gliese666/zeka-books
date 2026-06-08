@@ -1,11 +1,14 @@
 /**
- * PDF extractor.
- * Text-based: pdf-parse extracts raw text per page range.
- * Image-based detection: if extracted text is too sparse → flag for Vision OCR.
+ * PDF extractor — pdf-parse v2.x API (class-based).
+ *
+ * v1.x used: pdfParse(buffer) function
+ * v2.x uses: new PDFParse({ data: ArrayBuffer }) + getInfo() / getText()
+ *
+ * Key gotcha: PDF.js transfers the ArrayBuffer to a Worker, so each PDFParse
+ * instance needs its OWN independent copy of the buffer.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const pdfParse = require('pdf-parse') as (buf: Buffer, opts?: Record<string, unknown>) => Promise<{ numpages: number; text: string; info: Record<string, unknown> }>;
+import { PDFParse, type LoadParameters } from 'pdf-parse';
 
 export interface PdfMeta {
   title: string;
@@ -15,54 +18,88 @@ export interface PdfMeta {
   suggestedChapters: Array<{ title: string; pageStart: number; pageEnd: number }>;
 }
 
+// ── Buffer helpers ────────────────────────────────────────────────────────────
+
+/** Copy a Node.js Buffer into a fresh ArrayBuffer (safe to transfer to Worker). */
+function bufToArrayBuffer(buf: Buffer): ArrayBuffer {
+  const ab = new ArrayBuffer(buf.byteLength);
+  new Uint8Array(ab).set(buf);
+  return ab;
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
 /** Parse PDF metadata and detect if image-based. */
 export async function parsePdf(buffer: Buffer): Promise<PdfMeta> {
-  let result: Awaited<ReturnType<typeof pdfParse>>;
+  let totalPages: number;
+  let fullText: string;
+  let infoTitle: string | undefined;
 
   try {
-    result = await pdfParse(buffer, { max: 0 }); // max:0 = all pages
-  } catch {
-    throw new Error('Failed to parse PDF — file may be corrupted or encrypted');
+    // --- page count + title ---
+    const parser1 = new PDFParse({ data: bufToArrayBuffer(buffer) } as LoadParameters);
+    const info = await parser1.getInfo();
+    await parser1.destroy();
+    totalPages = info.total;
+    infoTitle = (info.info as Record<string, unknown>)?.Title as string | undefined;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to parse PDF metadata: ${msg}`);
   }
 
-  const totalPages = result.numpages;
-  const fullText = result.text || '';
+  try {
+    // --- text extraction ---
+    const parser2 = new PDFParse({ data: bufToArrayBuffer(buffer) } as LoadParameters);
+    const textResult = await parser2.getText();
+    await parser2.destroy();
+    fullText = textResult.text || '';
+  } catch (err) {
+    // Text extraction failed — treat as image-based
+    fullText = '';
+  }
 
-  // Heuristic: image-based if text density < 50 chars/page
-  const isImageBased = fullText.length / totalPages < 50;
+  // Heuristic 1: low text density
+  const lowDensity = totalPages > 0 && fullText.length / totalPages < 50;
 
-  // Try to detect chapters from headings (bold lines, numbered paragraphs)
+  // Heuristic 2: garbled encoding (e.g., WinAnsi misread)
+  // A genuine Russian/Azerbaijani PDF should have mostly Cyrillic + basic ASCII.
+  // If "normal" chars are < 50% of printable chars → garbled → treat as image.
+  const printable = fullText.replace(/\s/g, '');
+  const normalChars = (printable.match(/[\x20-\x7EЀ-ԯ]/g) ?? []).length;
+  const garbled = printable.length > 200 && normalChars / printable.length < 0.5;
+
+  const isImageBased = lowDensity || garbled;
+
   const suggestedChapters = isImageBased
-    ? []
+    ? generatePageGroups(totalPages, 15) // 15 pages per group for image-based PDFs
     : detectChaptersFromText(fullText, totalPages);
 
-  const title = (result.info?.Title as string) || 'Untitled PDF';
+  const title = infoTitle || 'Untitled PDF';
 
   return { title, totalPages, isImageBased, suggestedChapters };
 }
 
-/** Extract text for a page range (1-indexed). */
+/** Extract text for a page range (1-indexed, inclusive). */
 export async function extractPdfText(
   buffer: Buffer,
   pageStart: number,
   pageEnd: number
 ): Promise<string> {
-  const result = await pdfParse(buffer, {
-    max: pageEnd,
-    pagerender: (pageData: { pageIndex: number; pageContent?: Promise<string>; getTextContent: () => Promise<{ items: Array<{ str: string }> }> }) => {
-      // Only render pages in our range
-      if (pageData.pageIndex < pageStart - 1) return Promise.resolve('');
-      return pageData.getTextContent().then((content) => {
-        return content.items.map((item: { str: string }) => item.str).join(' ');
-      });
-    },
-  });
+  // first + last = inclusive range in pdf-parse v2
+  const parser = new PDFParse({
+    data: bufToArrayBuffer(buffer),
+  } as LoadParameters);
 
-  return result.text.trim();
+  try {
+    const result = await parser.getText({ first: pageStart, last: pageEnd });
+    return result.text.trim();
+  } finally {
+    await parser.destroy();
+  }
 }
 
 /** Extract a page as an image buffer (for image-based PDFs).
- *  Returns null if canvas rendering isn't available (server-side).
+ *  Returns null — server-side rendering not available without canvas.
  *  Caller should fall back to sending full page range via File API.
  */
 export async function extractPdfPageImage(
@@ -75,6 +112,23 @@ export async function extractPdfPageImage(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** For image-based PDFs without a TOC: group pages into equal-sized chunks. */
+function generatePageGroups(
+  totalPages: number,
+  pagesPerGroup: number
+): Array<{ title: string; pageStart: number; pageEnd: number }> {
+  const groups: Array<{ title: string; pageStart: number; pageEnd: number }> = [];
+  for (let start = 1; start <= totalPages; start += pagesPerGroup) {
+    const end = Math.min(start + pagesPerGroup - 1, totalPages);
+    groups.push({
+      title: `Страницы ${start}–${end}`,
+      pageStart: start,
+      pageEnd: end,
+    });
+  }
+  return groups;
+}
 
 function detectChaptersFromText(
   text: string,

@@ -2,9 +2,12 @@
  * GET /api/local-books
  * Lists all books in Books Labs folder on local disk.
  * Only works when running locally (npm run dev).
+ * ragReadyCount = chunk count from Supabase (not disk md files),
+ * so books processed via web UI show the correct status.
  */
 
 import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 import fs from 'fs';
 import path from 'path';
 
@@ -19,7 +22,7 @@ export interface LocalBook {
   fileName: string;     // "История_Азербайджана_9_ru.epub"
   fileType: 'epub' | 'pdf';
   sizeMb: number;
-  ragReadyCount: number; // processed chapters already in 01_RAG_Ready
+  ragReadyCount: number; // chunk count from Supabase (0 = not processed yet)
 }
 
 export async function GET() {
@@ -38,7 +41,6 @@ export async function GET() {
 
     for (const folder of folders) {
       const rawDir = path.join(BOOKS_LABS, folder, '00_Raw');
-      const ragDir = path.join(BOOKS_LABS, folder, '01_RAG_Ready');
 
       if (!fs.existsSync(rawDir)) continue;
 
@@ -53,12 +55,7 @@ export async function GET() {
       const stat = fs.statSync(filePath);
       const fileType = fileName.toLowerCase().endsWith('.epub') ? 'epub' : 'pdf';
 
-      // Count processed chapters
-      const ragReadyCount = fs.existsSync(ragDir)
-        ? fs.readdirSync(ragDir).filter(f => f.endsWith('.md')).length
-        : 0;
-
-      // Derive subject: folder name minus language suffix (рус/aze)
+      // Derive subject: folder name minus language suffix (рус/aze/ru/az)
       const subject = folder.replace(/\s+(рус|aze|ru|az)$/i, '').trim();
 
       books.push({
@@ -68,11 +65,45 @@ export async function GET() {
         fileName,
         fileType,
         sizeMb: Math.round(stat.size / 1024 / 1024 * 10) / 10,
-        ragReadyCount,
+        ragReadyCount: 0, // will be filled from Supabase below
       });
     }
   } catch (e) {
     return NextResponse.json({ error: String(e), books: [] });
+  }
+
+  // Enrich with Supabase chunk counts
+  // NOTE: subject stored in Supabase may be either the stripped name ("Coğrafiya 11")
+  // or the full folder name ("Coğrafiya 11 aze") depending on how processing was done.
+  // We check BOTH and take whichever has data.
+  try {
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
+
+    // Collect all possible lookup keys: stripped subject + full folder name
+    const allKeys = [...new Set(books.flatMap(b => [b.subject, b.folder]))];
+
+    if (allKeys.length > 0) {
+      const { data } = await supabase
+        .from('dim_textbooks_vector')
+        .select('subject')
+        .in('subject', allKeys);
+
+      if (data) {
+        const countMap: Record<string, number> = {};
+        for (const row of data) {
+          countMap[row.subject] = (countMap[row.subject] ?? 0) + 1;
+        }
+        for (const book of books) {
+          // Take count from stripped subject OR full folder name, whichever has data
+          book.ragReadyCount = (countMap[book.subject] ?? 0) + (countMap[book.folder] ?? 0);
+        }
+      }
+    }
+  } catch {
+    // Supabase unavailable — fall back to 0 counts (non-fatal)
   }
 
   return NextResponse.json({ books });

@@ -56,7 +56,7 @@ export default function LogsTerminal({ logs }: Props) {
       <div
         ref={bodyRef}
         className="terminal-body"
-        style={{ overflowY: 'auto' }}
+        style={{ overflowY: 'auto', padding: '10px 16px 16px' }}
       >
         {logs.length === 0 ? (
           <span
