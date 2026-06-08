@@ -130,7 +130,8 @@ export async function upsertChapterSession(
       onConflict: 'book_name,chapter_index',
     });
 
-  if (error) throw new Error(`Session upsert error: ${error.message}`);
+  // Non-fatal: table may not exist yet (SQL migration pending). Processing continues without checkpointing.
+  if (error) console.warn(`[books] Session upsert skipped: ${error.message}`);
 }
 
 export async function getBookSessions(bookName: string): Promise<ChapterSession[]> {
