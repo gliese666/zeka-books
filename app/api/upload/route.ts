@@ -1,24 +1,43 @@
 /**
  * POST /api/upload
- * Accepts a PDF or EPUB file, returns TOC structure for the client.
- * No AI calls here — just structural parsing.
+ * Two modes:
+ *   1. File upload (FormData with 'file') — limited to ~4.5MB on Vercel
+ *   2. Local path (FormData with 'filePath') — reads from disk, no size limit (local dev only)
+ * Returns TOC structure for the client.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { parseEpub } from '@/lib/extract/epub';
 import { parsePdf } from '@/lib/extract/pdf';
+import fs from 'fs';
+import path from 'path';
 
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
+    const filePath = formData.get('filePath') as string | null;
     const file = formData.get('file') as File | null;
     const subject = formData.get('subject') as string | null;
 
-    if (!file) return NextResponse.json({ error: 'No file provided' }, { status: 400 });
+    let buffer: Buffer;
+    let fileName: string;
 
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
-    const fileName = file.name;
+    if (filePath) {
+      // LOCAL PATH MODE — read from disk (local dev only)
+      const absPath = path.resolve(filePath);
+      if (!fs.existsSync(absPath)) {
+        return NextResponse.json({ error: `File not found: ${absPath}` }, { status: 404 });
+      }
+      buffer = fs.readFileSync(absPath);
+      fileName = path.basename(absPath);
+    } else if (file) {
+      // UPLOAD MODE — browser file upload
+      const bytes = await file.arrayBuffer();
+      buffer = Buffer.from(bytes);
+      fileName = file.name;
+    } else {
+      return NextResponse.json({ error: 'Provide either file or filePath' }, { status: 400 });
+    }
     const isEpub = fileName.toLowerCase().endsWith('.epub');
     const isPdf  = fileName.toLowerCase().endsWith('.pdf');
 
@@ -47,6 +66,8 @@ export async function POST(req: NextRequest) {
       totalPages: meta.totalPages,
       chapters: meta.chapters,
       subject: subject || meta.title,
+      // Pass filePath back so client can use local mode for processing
+      ...(filePath ? { filePath } : {}),
     });
 
   } catch (err) {

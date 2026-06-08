@@ -22,6 +22,7 @@ interface UploadResult {
   totalPages: number;
   chapters: Chapter[];
   subject: string;
+  filePath?: string; // set when using local Books Labs mode
 }
 
 interface LogEntry {
@@ -76,18 +77,25 @@ export default function HomePage() {
 
   // ── Upload ──────────────────────────────────────────────────────────────────
 
-  const handleUpload = useCallback(async (file: File, subject: string) => {
+  const handleUpload = useCallback(async (file: File | null, subject: string, filePath?: string) => {
     setIsUploading(true);
     setUploadResult(null);
     setChapterStatuses({});
     setChunkCounts({});
     setLogs([]);
     setTotalChunks(0);
-    addLog(`Загрузка файла: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)}MB)...`);
+
+    const displayName = filePath ? filePath.split('/').pop() : file?.name;
+    const displaySize = file ? `${(file.size / 1024 / 1024).toFixed(1)}MB` : 'с диска';
+    addLog(`Загрузка: ${displayName} (${displaySize})...`);
 
     try {
       const form = new FormData();
-      form.append('file', file);
+      if (filePath) {
+        form.append('filePath', filePath);
+      } else if (file) {
+        form.append('file', file);
+      }
       form.append('subject', subject);
 
       const res = await fetch('/api/upload', { method: 'POST', body: form });
@@ -98,7 +106,8 @@ export default function HomePage() {
       setUploadedFile(file);
 
       // Load existing sessions for resume
-      const sessRes = await fetch(`/api/sessions?book=${encodeURIComponent(file.name)}`);
+      const bookKey = filePath ? (filePath.split('/').pop() ?? filePath) : (file?.name ?? '');
+      const sessRes = await fetch(`/api/sessions?book=${encodeURIComponent(bookKey)}`);
       if (sessRes.ok) {
         const sessions = await sessRes.json();
         const statuses: ChapterStatus = {};
@@ -113,9 +122,9 @@ export default function HomePage() {
         setTotalChunks(total);
       }
 
-      addLog(`✅ Файл разобран: ${data.chapters.length} глав, ${data.totalPages} стр. (${data.isImageBased ? 'image-based' : 'text-based'})`, 'ok');
+      addLog(`✅ Разобрано: ${data.chapters.length} глав, ${data.totalPages} стр. (${data.isImageBased ? 'image-based' : 'text-based'})`, 'ok');
     } catch (err) {
-      addLog(`❌ Ошибка загрузки: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      addLog(`❌ Ошибка: ${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setIsUploading(false);
     }
@@ -145,7 +154,13 @@ export default function HomePage() {
       addLog(`\n▶ Глава ${idx}/${chapters.length}: ${ch.title.slice(0, 60)}`, 'info');
 
       const form = new FormData();
-      form.append('file', uploadedFile);
+      // Prefer filePath (local mode) over file binary (upload mode)
+      if (uploadResult.filePath) {
+        form.append('filePath', uploadResult.filePath);
+      } else if (uploadedFile) {
+        form.append('file', uploadedFile);
+        form.append('bookName', uploadedFile.name);
+      }
       form.append('subject', uploadResult.subject);
       form.append('chapterTitle', ch.title);
       form.append('chapterIndex', String(idx));
@@ -153,7 +168,6 @@ export default function HomePage() {
       form.append('pageEnd', String(ch.pageEnd));
       form.append('fileType', uploadResult.fileType);
       form.append('isImageBased', String(uploadResult.isImageBased));
-      form.append('bookName', uploadedFile.name);
 
       try {
         const res = await fetch('/api/process', { method: 'POST', body: form });
