@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "process": "node --require ./scripts/load-env.cjs ./node_modules/.bin/tsx scripts/process-local.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.107.0",
@@ -24,6 +25,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
+    "tsx": "^4.22.4",
     "typescript": "^5"
   }
 }
