@@ -6,15 +6,24 @@
  * - list processed books
  */
 
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { createHash } from 'crypto';
 import type { KarpathyChunk } from '@/lib/ai/deepseek';
 import { subjectLang } from '@/lib/normalize';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// Lazy client — created on first call so build-time collection doesn't crash
+// when env vars aren't available (e.g. Vercel preview with no secrets set).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _supabase: SupabaseClient<any> | null = null;
+function getSupabase(): SupabaseClient<any> {
+  if (!_supabase) {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) throw new Error('Supabase env vars not set (NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)');
+    _supabase = createClient(url, key);
+  }
+  return _supabase;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -113,7 +122,7 @@ export async function injectChunk(
 
   // Идемпотентность: повторная вставка того же чанка молча игнорируется
   // (unique index uq_dim_subject_hash(subject, content_hash), создан в Пакете 1).
-  const { error } = await supabase
+  const { error } = await getSupabase()
     .from('dim_textbooks_vector')
     .upsert(
       {
@@ -137,7 +146,7 @@ export async function getChapterSession(
   bookName: string,
   chapterIndex: number
 ): Promise<ChapterSession | null> {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabase()
     .from('book_processing_sessions')
     .select('*')
     .eq('book_name', bookName)
@@ -176,7 +185,7 @@ export async function upsertChapterSession(
     payload.completed_at = new Date().toISOString();
   }
 
-  const { error } = await supabase
+  const { error } = await getSupabase()
     .from('book_processing_sessions')
     .upsert(payload, { onConflict: 'book_name,chapter_index' });
 
@@ -188,7 +197,7 @@ export async function upsertChapterSession(
 export async function bumpChapterAttempts(bookName: string, chapterIndex: number): Promise<number> {
   const existing = await getChapterSession(bookName, chapterIndex);
   const attempts = (existing?.attempts ?? 0) + 1;
-  await supabase
+  await getSupabase()
     .from('book_processing_sessions')
     .update({ attempts })
     .eq('book_name', bookName)
@@ -197,7 +206,7 @@ export async function bumpChapterAttempts(bookName: string, chapterIndex: number
 }
 
 export async function getBookSessions(bookName: string): Promise<ChapterSession[]> {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabase()
     .from('book_processing_sessions')
     .select('*')
     .eq('book_name', bookName)
@@ -221,7 +230,7 @@ export interface NewJob {
 }
 
 export async function createJob(job: NewJob): Promise<BookJob> {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabase()
     .from('book_jobs')
     .insert({ ...job, total_chapters: job.chapters.length, status: 'queued' })
     .select('*')
@@ -236,7 +245,7 @@ export interface JobWithProgress extends BookJob {
 }
 
 export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabase()
     .from('book_jobs')
     .select('*')
     .order('created_at', { ascending: false })
@@ -246,7 +255,7 @@ export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
   if (!jobs.length) return [];
 
   // Enrich with per-job progress from chapter checkpoints (one query).
-  const { data: sess } = await supabase
+  const { data: sess } = await getSupabase()
     .from('book_processing_sessions')
     .select('job_id, status, chunks_count')
     .in('job_id', jobs.map((j) => j.id));
@@ -263,7 +272,7 @@ export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
 }
 
 export async function getJob(id: string): Promise<BookJob | null> {
-  const { data, error } = await supabase.from('book_jobs').select('*').eq('id', id).single();
+  const { data, error } = await getSupabase().from('book_jobs').select('*').eq('id', id).single();
   if (error) return null;
   return data as BookJob;
 }
@@ -273,7 +282,7 @@ export async function getJob(id: string): Promise<BookJob | null> {
  * (running = resume after a worker crash). Sets status='running'.
  */
 export async function claimNextJob(): Promise<BookJob | null> {
-  const { data } = await supabase
+  const { data } = await getSupabase()
     .from('book_jobs')
     .select('*')
     .in('status', ['queued', 'running'])
@@ -284,7 +293,7 @@ export async function claimNextJob(): Promise<BookJob | null> {
 
   const patch: Record<string, unknown> = { status: 'running', updated_at: new Date().toISOString() };
   if (!job.started_at) patch.started_at = new Date().toISOString();
-  await supabase.from('book_jobs').update(patch).eq('id', job.id);
+  await getSupabase().from('book_jobs').update(patch).eq('id', job.id);
   return { ...job, status: 'running' };
 }
 
@@ -296,7 +305,7 @@ export async function updateJobStatus(
   const patch: Record<string, unknown> = { status, updated_at: new Date().toISOString() };
   if (errorMessage !== null) patch.error_message = errorMessage;
   if (status === 'done' || status === 'error') patch.completed_at = new Date().toISOString();
-  await supabase.from('book_jobs').update(patch).eq('id', id);
+  await getSupabase().from('book_jobs').update(patch).eq('id', id);
 }
 
 // ── Live events (book_processing_events) ────────────────────────────────────────
@@ -305,7 +314,7 @@ export async function appendEvent(
   jobId: string,
   ev: { level?: string; type?: string | null; msg: string; chapterIndex?: number | null; data?: Record<string, unknown> | null }
 ): Promise<void> {
-  const { error } = await supabase.from('book_processing_events').insert({
+  const { error } = await getSupabase().from('book_processing_events').insert({
     job_id: jobId,
     chapter_index: ev.chapterIndex ?? null,
     level: ev.level ?? 'info',
@@ -317,7 +326,7 @@ export async function appendEvent(
 }
 
 export async function getEventsSince(jobId: string, afterId = 0, limit = 500): Promise<ProcessingEvent[]> {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabase()
     .from('book_processing_events')
     .select('*')
     .eq('job_id', jobId)
@@ -330,7 +339,7 @@ export async function getEventsSince(jobId: string, afterId = 0, limit = 500): P
 
 /** Recover after a crash: any chapter stuck in 'processing' for this book → 'pending'. */
 export async function resetStuckChapters(bookName: string): Promise<void> {
-  await supabase
+  await getSupabase()
     .from('book_processing_sessions')
     .update({ status: 'pending' })
     .eq('book_name', bookName)
@@ -339,7 +348,7 @@ export async function resetStuckChapters(bookName: string): Promise<void> {
 
 /** Retry-failed: flip only 'error' chapters back to 'pending'. */
 export async function resetFailedChapters(bookName: string): Promise<void> {
-  await supabase
+  await getSupabase()
     .from('book_processing_sessions')
     .update({ status: 'pending', error_message: null })
     .eq('book_name', bookName)
@@ -348,13 +357,13 @@ export async function resetFailedChapters(bookName: string): Promise<void> {
 
 /** Full re-run: drop all chapter checkpoints for the book (chunk inject stays idempotent). */
 export async function resetAllChapters(bookName: string): Promise<void> {
-  await supabase.from('book_processing_sessions').delete().eq('book_name', bookName);
+  await getSupabase().from('book_processing_sessions').delete().eq('book_name', bookName);
 }
 
 // ── Book list ─────────────────────────────────────────────────────────────────
 
 export async function listProcessedBooks(): Promise<BookSummary[]> {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabase()
     .from('dim_textbooks_vector')
     .select('subject, topic');
 
@@ -384,7 +393,7 @@ export interface AuditResult {
 }
 
 export async function auditChapter(subject: string, topic: string): Promise<AuditResult> {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabase()
     .from('dim_textbooks_vector')
     .select('content, metadata')
     .eq('subject', subject)
