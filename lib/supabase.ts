@@ -31,7 +31,7 @@ export function getSupabaseAdmin(): SupabaseClient<any> { return getSupabase(); 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type SessionStatus = 'pending' | 'processing' | 'done' | 'error';
-export type JobStatus = 'queued' | 'running' | 'paused' | 'done' | 'error';
+export type JobStatus = 'queued' | 'running' | 'paused' | 'done' | 'error' | 'archived';
 
 export interface ChapterMeta {
   title: string;
@@ -361,6 +361,38 @@ export async function resetFailedChapters(bookName: string): Promise<void> {
 /** Full re-run: drop all chapter checkpoints for the book (chunk inject stays idempotent). */
 export async function resetAllChapters(bookName: string): Promise<void> {
   await getSupabase().from('book_processing_sessions').delete().eq('book_name', bookName);
+}
+
+/** Hard reset: delete all RAG chunks for this subject (full reprocess from scratch). */
+export async function deleteChunksBySubject(subject: string): Promise<number> {
+  const { data, error } = await getSupabase()
+    .from('dim_textbooks_vector')
+    .delete()
+    .eq('subject', subject)
+    .select('id');
+  if (error) throw new Error(`deleteChunksBySubject: ${error.message}`);
+  return data?.length ?? 0;
+}
+
+/** View chunks for a subject (without embeddings — too large to send). */
+export interface ChunkRow {
+  id: number;
+  subject: string;
+  topic: string;
+  content: string;
+  content_hash: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export async function getChunksBySubject(subject: string): Promise<ChunkRow[]> {
+  const { data, error } = await getSupabase()
+    .from('dim_textbooks_vector')
+    .select('id, subject, topic, content, content_hash, metadata, created_at')
+    .eq('subject', subject)
+    .order('id', { ascending: true });
+  if (error) return [];
+  return (data ?? []) as ChunkRow[];
 }
 
 // ── Book list ─────────────────────────────────────────────────────────────────
