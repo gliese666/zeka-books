@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --port 3005",
     "build": "next build",
-    "start": "next start",
+    "start": "next start --port 3005",
     "worker": "node_modules/.bin/tsx --env-file=.env.local worker/index.ts",
-    "dev:all": "concurrently -n web,worker -c cyan,magenta \"next dev\" \"npm run worker\""
+    "dev:all": "concurrently -n web,worker -c cyan,magenta \"next dev --port 3005\" \"npm run worker\""
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.107.0",

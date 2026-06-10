@@ -25,6 +25,9 @@ function getSupabase(): SupabaseClient<any> {
   return _supabase;
 }
 
+/** Exported for use in API routes that need direct Supabase access. */
+export function getSupabaseAdmin(): SupabaseClient<any> { return getSupabase(); }
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type SessionStatus = 'pending' | 'processing' | 'done' | 'error';

@@ -1,246 +1,511 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import LocalBooksPanel, { type LocalBook } from '@/components/LocalBooksPanel';
-import JobBoard, { type Job, type JobAction } from '@/components/JobBoard';
-import ChapterMonitorGrid, { type ChapterRow } from '@/components/ChapterMonitorGrid';
-import StatusDot, { type DotStatus } from '@/components/StatusDot';
-import LogsTerminal from '@/components/LogsTerminal';
+import { useState, useEffect, useCallback, useRef, DragEvent } from 'react';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface JobListItem extends Job {
-  done_chapters: number;
-  total_chunks: number;
-  updated_at: string;
+
+interface Stats {
+  totalBooks: number; totalChunks: number;
+  running: number; errors: number; queued: number;
+  bySubject: Record<string, number>;
 }
-interface ProcessingEvent {
-  id: number;
-  chapter_index: number | null;
-  ts: string;
-  level: 'ok' | 'info' | 'warn' | 'error';
-  type: string | null;
-  msg: string;
+interface Job {
+  id: string; book_name: string; subject: string;
+  status: string; file_type: 'epub' | 'pdf'; is_image_based: boolean;
+  total_chapters: number; total_pages: number;
+  done_chapters: number; total_chunks: number;
+  error_message: string | null; updated_at: string;
 }
-interface JobFull {
-  id: string;
-  book_name: string;
-  subject: string;
-  status: DotStatus;
-  file_type: 'epub' | 'pdf';
-  is_image_based: boolean;
-  total_chapters: number;
-  total_pages: number;
+interface Chapter {
+  chapter_index: number; chapter_title: string;
+  status: string; chunks_count: number; error_message: string | null;
 }
-interface JobDetail {
-  job: JobFull;
-  chapters: ChapterRow[];
+interface Evt {
+  id: number; chapter_index: number | null; ts: string;
+  level: 'ok' | 'info' | 'warn' | 'error'; type: string | null; msg: string;
+}
+interface LocalBook {
+  folder: string; subject: string; filePath: string;
+  fileName: string; fileType: 'epub' | 'pdf'; sizeMb: number; ragReadyCount: number;
 }
 
-const POLL_MS = 1000;
-
-function hhmmss(iso: string): string {
-  return new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
-
-// Map latest event type → pipeline step index for the StepTimeline.
-const STEPS = ['Извлечение', 'Чанкинг (AI)', 'Эмбеддинг', 'Запись в Supabase'];
-function stepFromEventType(type: string | null): number {
-  if (!type) return -1;
-  if (type.startsWith('extract')) return 0;
-  if (type.startsWith('chunk')) return 1;
-  if (type.startsWith('embed')) return 2;
-  if (type === 'supabase_inject' || type === 'chapter_done') return 3;
+const POLL = 1500;
+const STEPS = ['📦 Извлечение', '🤖 Чанкинг AI', '🔢 Эмбеддинги', '💾 Supabase'];
+const C: Record<string, string> = {
+  done:'#22c55e', running:'#3b82f6', processing:'#3b82f6',
+  error:'#ef4444', queued:'#f59e0b', pending:'#94a3b8', paused:'#f59e0b',
+};
+const fmt = (iso: string) => new Date(iso).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+const stepOf = (t: string|null) => {
+  if (!t) return -1;
+  if (t.startsWith('extract')) return 0;
+  if (t.startsWith('chunk'))   return 1;
+  if (t.startsWith('embed'))   return 2;
+  if (t === 'supabase_inject'||t === 'chapter_done') return 3;
   return -1;
-}
+};
+const btn = (color: string): React.CSSProperties => ({
+  height:30, padding:'0 14px', borderRadius:8, fontSize:12, fontWeight:600,
+  background:`${color}18`, color, border:`1px solid ${color}40`, cursor:'pointer',
+});
 
-export default function HomePage() {
-  const [localBooks, setLocalBooks] = useState<LocalBook[]>([]);
-  const [jobs, setJobs] = useState<JobListItem[]>([]);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<JobDetail | null>(null);
-  const [selectedChapter, setSelectedChapter] = useState<number | null>(null);
-  const [events, setEvents] = useState<ProcessingEvent[]>([]);
-  const [enqueuingPath, setEnqueuingPath] = useState<string | null>(null);
+// ── Component ─────────────────────────────────────────────────────────────────
 
-  const cursorRef = useRef(0);
+export default function Dashboard() {
+  const [stats, setStats]           = useState<Stats|null>(null);
+  const [jobs, setJobs]             = useState<Job[]>([]);
+  const [local, setLocal]           = useState<LocalBook[]>([]);
+  const [expanded, setExpanded]     = useState<string|null>(null);
+  const [chapters, setChapters]     = useState<Chapter[]>([]);
+  const [events, setEvents]         = useState<Evt[]>([]);
+  const [clock, setClock]           = useState('');
+  const [drag, setDrag]             = useState(false);
+  const [uploading, setUploading]   = useState(false);
+  const [uploadMsg, setUploadMsg]   = useState<{ok:boolean;text:string}|null>(null);
+  const [subjectHint, setHint]      = useState('');
+  const cursor = useRef(0);
+  const logRef = useRef<HTMLDivElement>(null);
 
-  // ── Load local books once ────────────────────────────────────────────────
-  useEffect(() => {
-    fetch('/api/local-books').then((r) => r.json()).then((d) => setLocalBooks(d.books ?? [])).catch(() => {});
-  }, []);
+  // Clock
+  useEffect(()=>{
+    const t = setInterval(()=>setClock(new Date().toLocaleTimeString('ru-RU')),1000);
+    setClock(new Date().toLocaleTimeString('ru-RU'));
+    return ()=>clearInterval(t);
+  },[]);
 
-  // ── Poll jobs + selected detail + events every 1s ────────────────────────
-  useEffect(() => {
+  // Local books
+  useEffect(()=>{
+    fetch('/api/local-books').then(r=>r.json()).then(d=>setLocal(d.books??[]));
+  },[]);
+
+  // Poll stats + jobs
+  useEffect(()=>{
     let alive = true;
-    async function tick() {
+    const tick = async () => {
       try {
-        const list: JobListItem[] = await fetch('/api/jobs').then((r) => r.json());
-        if (alive) setJobs(list);
+        const [s,j] = await Promise.all([
+          fetch('/api/stats').then(r=>r.json()),
+          fetch('/api/jobs').then(r=>r.json()),
+        ]);
+        if (!alive) return;
+        setStats(s); setJobs(j);
+        const running = (j as Job[]).find(x=>x.status==='running');
+        if (running) setExpanded(id => id ?? running.id);
+      } catch {}
+    };
+    tick(); const t = setInterval(tick,POLL);
+    return ()=>{ alive=false; clearInterval(t); };
+  },[]);
 
-        if (selectedJobId) {
-          const d: JobDetail = await fetch(`/api/jobs/${selectedJobId}`).then((r) => r.json());
-          if (alive) setDetail(d);
-
-          const { events: evs }: { events: ProcessingEvent[] } = await fetch(
-            `/api/jobs/${selectedJobId}/events?after=${cursorRef.current}`
-          ).then((r) => r.json());
-          if (alive && evs?.length) {
-            cursorRef.current = evs[evs.length - 1].id;
-            setEvents((prev) => [...prev, ...evs]);
-          }
+  // Poll detail + events for expanded job
+  useEffect(()=>{
+    if (!expanded) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const [d,{events:evs}] = await Promise.all([
+          fetch(`/api/jobs/${expanded}`).then(r=>r.json()),
+          fetch(`/api/jobs/${expanded}/events?after=${cursor.current}`).then(r=>r.json()),
+        ]);
+        if (!alive) return;
+        setChapters(d.chapters??[]);
+        if (evs?.length){
+          cursor.current = evs[evs.length-1].id;
+          setEvents(p=>[...p.slice(-500),...evs]);
+          setTimeout(()=>logRef.current?.scrollTo({top:99999,behavior:'smooth'}),50);
         }
-      } catch { /* transient — keep polling */ }
+      } catch {}
+    };
+    tick(); const t = setInterval(tick,POLL);
+    return ()=>{ alive=false; clearInterval(t); };
+  },[expanded]);
+
+  // Upload
+  const uploadFile = useCallback(async (file: File) => {
+    if (!file.name.match(/\.(pdf|epub)$/i)){
+      setUploadMsg({ok:false,text:'Только PDF или EPUB'}); return;
     }
-    tick();
-    const t = setInterval(tick, POLL_MS);
-    return () => { alive = false; clearInterval(t); };
-  }, [selectedJobId]);
-
-  // ── Actions ──────────────────────────────────────────────────────────────
-  const selectJob = useCallback((id: string) => {
-    setSelectedJobId(id);
-    setSelectedChapter(null);
-    setEvents([]);
-    cursorRef.current = 0;
-  }, []);
-
-  const enqueue = useCallback(async (book: LocalBook) => {
-    setEnqueuingPath(book.filePath);
+    setUploading(true); setUploadMsg(null);
     try {
-      const res = await fetch('/api/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filePath: book.filePath, subject: book.subject }),
-      });
-      const job = await res.json();
-      if (res.ok && job?.id) selectJob(job.id);
-    } finally {
-      setEnqueuingPath(null);
-    }
-  }, [selectJob]);
+      const fd = new FormData();
+      fd.append('file',file);
+      if (subjectHint.trim()) fd.append('subject',subjectHint.trim());
+      const res = await fetch('/api/upload-pdf',{method:'POST',body:fd});
+      const data = await res.json();
+      if (!res.ok){ setUploadMsg({ok:false,text:data.error??'Ошибка'}); return; }
+      setUploadMsg({ok:true,text:`✅ "${data.subject}" поставлен в очередь`});
+      setExpanded(data.id); setEvents([]); cursor.current=0;
+      setHint('');
+      fetch('/api/local-books').then(r=>r.json()).then(d=>setLocal(d.books??[]));
+    } catch(e){ setUploadMsg({ok:false,text:String(e)}); }
+    finally { setUploading(false); }
+  },[subjectHint]);
 
-  const jobAction = useCallback(async (id: string, action: JobAction) => {
-    await fetch(`/api/jobs/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
-    });
-  }, []);
+  const onDrop = useCallback((e:DragEvent<HTMLDivElement>)=>{
+    e.preventDefault(); setDrag(false);
+    const f = e.dataTransfer.files[0]; if(f) uploadFile(f);
+  },[uploadFile]);
 
-  // ── Derived ──────────────────────────────────────────────────────────────
-  const doneByJob: Record<string, number> = Object.fromEntries(jobs.map((j) => [j.id, j.done_chapters]));
-  const chunksByJob: Record<string, number> = Object.fromEntries(jobs.map((j) => [j.id, j.total_chunks]));
+  const enqueue = useCallback(async (b:LocalBook)=>{
+    const res = await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filePath:b.filePath,subject:b.subject})});
+    const j = await res.json();
+    if (res.ok&&j?.id){ setExpanded(j.id); setEvents([]); cursor.current=0; }
+  },[]);
 
-  const logs = events.map((e) => ({ ts: hhmmss(e.ts), msg: e.msg, level: e.level }));
+  const action = useCallback(async (id:string,a:string)=>{
+    await fetch(`/api/jobs/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:a})});
+  },[]);
 
-  // Live step for the currently processing chapter.
-  const lastEvent = events[events.length - 1];
-  const currentStep = stepFromEventType(lastEvent?.type ?? null);
-  const isRunning = detail?.job.status === 'running';
+  const selectJob = useCallback((id:string)=>{
+    setExpanded(p=>p===id?null:id); setEvents([]); cursor.current=0;
+  },[]);
 
-  // Derive progress from chapter checkpoints (detail endpoint returns raw job).
-  const detailDone = detail ? detail.chapters.filter((c) => c.status === 'done').length : 0;
-  const detailChunks = detail ? detail.chapters.reduce((s, c) => s + (c.chunks_count ?? 0), 0) : 0;
-
-  const workerLikelyUp = jobs.some((j) => j.status === 'running') &&
-    !!lastEvent && Date.now() - new Date(lastEvent.ts).getTime() < 15000;
+  // Derived
+  const expJob = jobs.find(j=>j.id===expanded)??null;
+  const lastEv = events[events.length-1];
+  const curStep = stepOf(lastEv?.type??null);
+  const isRunning = expJob?.status==='running';
+  const workerUp = jobs.some(j=>j.status==='running');
+  const ragList = Object.entries(stats?.bySubject??{}).sort((a,b)=>b[1]-a[1]);
+  const unprocessed = local.filter(b=>b.ragReadyCount===0);
 
   return (
-    <>
-      <nav style={{ borderBottom: '1px solid var(--hairline)', height: 56, display: 'flex', alignItems: 'center', padding: '0 24px' }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 18 }}>Zeka Books · Worker</span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-            <span className={`sdot sdot--${workerLikelyUp ? 'running' : 'pending'}`} />
-            <span className="caption-sm">{workerLikelyUp ? 'Worker активен' : 'Worker: запусти npm run dev:all'}</span>
+    <div style={{minHeight:'100vh',background:'#f8fafc'}}>
+
+      {/* Navbar */}
+      <nav style={{
+        background:'#0f172a',color:'#f8fafc',height:52,
+        display:'flex',alignItems:'center',padding:'0 24px',
+        position:'sticky',top:0,zIndex:100,
+        borderBottom:'1px solid #1e293b',
+      }}>
+        <div style={{maxWidth:1140,margin:'0 auto',width:'100%',display:'flex',alignItems:'center',gap:16}}>
+          <span style={{fontFamily:'var(--font-display)',fontWeight:700,fontSize:17}}>📚 Zeka Books</span>
+          <span style={{flex:1}}/>
+          <span style={{display:'flex',alignItems:'center',gap:6}}>
+            <span style={{
+              width:8,height:8,borderRadius:'50%',display:'inline-block',
+              background:workerUp?'#22c55e':'#f59e0b',
+              boxShadow:workerUp?'0 0 0 3px rgba(34,197,94,0.25)':'none',
+            }}/>
+            <span style={{fontSize:12,color:'#94a3b8'}}>{workerUp?'Worker работает':'Worker остановлен'}</span>
           </span>
+          <span style={{fontSize:12,color:'#475569',fontFamily:'var(--font-mono)'}}>{clock}</span>
         </div>
       </nav>
 
-      <main style={{ padding: '24px 24px 64px' }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto', display: 'grid', gridTemplateColumns: '380px 1fr', gap: 24 }}>
+      <main style={{maxWidth:1140,margin:'0 auto',padding:'28px 24px 80px'}}>
 
-          {/* Left: queue control */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-            <LocalBooksPanel books={localBooks} enqueuingPath={enqueuingPath} onEnqueue={enqueue} />
-            <div>
-              <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 12px' }}>Очередь</h3>
-              <JobBoard
-                jobs={jobs}
-                doneByJob={doneByJob}
-                chunksByJob={chunksByJob}
-                activeId={selectedJobId}
-                onSelect={selectJob}
-                onAction={jobAction}
-              />
-            </div>
-          </div>
-
-          {/* Right: live monitor of selected job */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-            {!detail ? (
-              <div className="card" style={{ padding: 40, textAlign: 'center' }}>
-                <p className="body-md" style={{ margin: 0 }}>Выбери задание в очереди, чтобы видеть обработку в реальном времени.</p>
+        {/* Stats */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:28}}>
+          {[
+            {icon:'📚',label:'Книг в RAG',     val:stats?.totalBooks??'—', color:'#6366f1'},
+            {icon:'🧩',label:'Чанков в базе',  val:stats?.totalChunks??'—',color:'#0ea5e9'},
+            {icon:'⚡',label:'В обработке',    val:stats?.running??0,       color:'#f59e0b'},
+            {icon:'❌',label:'С ошибками',     val:stats?.errors??0,        color:'#ef4444'},
+          ].map(s=>(
+            <div key={s.label} style={{
+              background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,
+              padding:'18px 20px',display:'flex',alignItems:'center',gap:14,
+              boxShadow:'0 1px 3px rgba(0,0,0,0.06)',
+            }}>
+              <span style={{width:44,height:44,borderRadius:12,display:'flex',alignItems:'center',
+                justifyContent:'center',fontSize:20,background:`${s.color}18`,flexShrink:0}}>{s.icon}</span>
+              <div>
+                <div style={{fontSize:24,fontWeight:700,lineHeight:1,color:'#0f172a'}}>{s.val}</div>
+                <div style={{fontSize:12,color:'#64748b',marginTop:3}}>{s.label}</div>
               </div>
-            ) : (
-              <>
-                {/* Header */}
-                <div className="card" style={{ padding: '16px 20px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                    <StatusDot status={detail.job.status} withLabel />
-                    <span style={{ fontSize: 16, fontWeight: 700, marginLeft: 4 }}>{detail.job.subject}</span>
-                    <span className="chip" style={{ marginLeft: 'auto' }}>{detail.job.file_type?.toUpperCase?.() ?? ''}{detail.job.is_image_based ? ' · image' : ' · text'}</span>
-                  </div>
-                  <div style={{ display: 'flex', gap: 0, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--hairline)' }}>
-                    {[
-                      { label: 'Глав', value: `${detailDone}/${detail.job.total_chapters}` },
-                      { label: 'Чанков', value: detailChunks },
-                      { label: 'Страниц', value: detail.job.total_pages },
-                    ].map((s, i) => (
-                      <div key={s.label} style={{ flex: 1, padding: '10px 0', textAlign: 'center', borderRight: i < 2 ? '1px solid var(--hairline)' : 'none', background: 'var(--surface-soft)' }}>
-                        <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1 }}>{s.value}</div>
-                        <div style={{ fontSize: 11, color: 'var(--mute)', marginTop: 3 }}>{s.label}</div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Step timeline */}
-                  {isRunning && currentStep >= 0 && (
-                    <div style={{ marginTop: 12 }}>
-                      {STEPS.map((name, i) => (
-                        <div className="step-row" key={name}>
-                          <StatusDot status={i < currentStep ? 'done' : i === currentStep ? 'processing' : 'pending'} />
-                          <span className="step-row__name">{name}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Chapter monitor grid */}
-                <div className="card" style={{ padding: 16 }}>
-                  <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 12px' }}>Главы</h3>
-                  <ChapterMonitorGrid
-                    chapters={detail.chapters}
-                    totalChapters={detail.job.total_chapters}
-                    activeIndex={selectedChapter}
-                    onSelect={setSelectedChapter}
-                  />
-                </div>
-
-                {/* Live log (filtered to chapter if one selected) */}
-                <LogsTerminal
-                  logs={
-                    selectedChapter
-                      ? events.filter((e) => e.chapter_index === selectedChapter).map((e) => ({ ts: hhmmss(e.ts), msg: e.msg, level: e.level }))
-                      : logs
-                  }
-                />
-              </>
-            )}
-          </div>
+            </div>
+          ))}
         </div>
+
+        {/* Upload */}
+        <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:20,marginBottom:28,boxShadow:'0 1px 3px rgba(0,0,0,0.06)'}}>
+          <h2 style={{fontSize:15,fontWeight:700,color:'#0f172a',margin:'0 0 14px',display:'flex',alignItems:'center',gap:8}}>
+            📥 Загрузить книгу
+          </h2>
+          <input
+            type="text"
+            placeholder="Название предмета (необязательно) — например: Fizika 9"
+            value={subjectHint}
+            onChange={e=>setHint(e.target.value)}
+            style={{
+              width:'100%',height:40,padding:'0 14px',marginBottom:12,
+              border:'1px solid #e2e8f0',borderRadius:10,fontSize:14,
+              color:'#0f172a',background:'#f8fafc',outline:'none',boxSizing:'border-box',
+            }}
+          />
+          <label style={{cursor:'pointer'}}>
+            <input type="file" accept=".pdf,.epub" style={{display:'none'}} onChange={e=>{const f=e.target.files?.[0];if(f)uploadFile(f);e.target.value='';}}/>
+            <div
+              onDragOver={e=>{e.preventDefault();setDrag(true);}}
+              onDragLeave={()=>setDrag(false)}
+              onDrop={onDrop}
+              style={{
+                border:`2px dashed ${drag?'#6366f1':'#cbd5e1'}`,
+                borderRadius:12,padding:'28px 24px',textAlign:'center',
+                background:drag?'#eef2ff':'#f8fafc',transition:'all 0.15s',
+                cursor:uploading?'wait':'pointer',
+              }}
+            >
+              {uploading?(
+                <span style={{fontSize:14,color:'#64748b'}}>⏳ Загружаю файл и ставлю в очередь...</span>
+              ):(
+                <>
+                  <div style={{fontSize:36,marginBottom:8}}>📥</div>
+                  <div style={{fontSize:15,fontWeight:600,color:'#1e293b'}}>Перетащи PDF или EPUB сюда</div>
+                  <div style={{fontSize:13,color:'#94a3b8',marginTop:4}}>или нажми для выбора · PDF, EPUB до 200MB</div>
+                </>
+              )}
+            </div>
+          </label>
+          {uploadMsg&&(
+            <div style={{
+              marginTop:12,padding:'10px 14px',borderRadius:10,fontSize:13,
+              background:uploadMsg.ok?'#f0fdf4':'#fef2f2',
+              color:uploadMsg.ok?'#15803d':'#dc2626',
+              border:`1px solid ${uploadMsg.ok?'#bbf7d0':'#fecaca'}`,
+            }}>{uploadMsg.text}</div>
+          )}
+        </div>
+
+        {/* Books in RAG */}
+        {ragList.length>0&&(
+          <section style={{marginBottom:28}}>
+            <h2 style={{fontSize:15,fontWeight:700,color:'#0f172a',margin:'0 0 14px'}}>📖 Книги в RAG</h2>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(210px,1fr))',gap:12}}>
+              {ragList.map(([subj,cnt])=>{
+                const lb = local.find(b=>b.subject===subj);
+                return (
+                  <div key={subj} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:16,boxShadow:'0 1px 3px rgba(0,0,0,0.05)'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+                      <span style={{width:9,height:9,borderRadius:'50%',background:'#22c55e',display:'inline-block',flexShrink:0}}/>
+                      <span style={{fontSize:14,fontWeight:600,color:'#0f172a',lineHeight:1.3}}>{subj}</span>
+                    </div>
+                    <div style={{fontSize:12,color:'#64748b',marginBottom:10}}>
+                      {lb?`${lb.fileType.toUpperCase()} · ${lb.sizeMb}MB · `:''}
+                      <b style={{color:'#0f172a'}}>{cnt}</b> чанков
+                    </div>
+                    <div style={{height:5,background:'#f1f5f9',borderRadius:99}}>
+                      <div style={{height:'100%',width:'100%',background:'#22c55e',borderRadius:99}}/>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Unprocessed local books */}
+        {unprocessed.length>0&&(
+          <section style={{marginBottom:28}}>
+            <h2 style={{fontSize:15,fontWeight:700,color:'#0f172a',margin:'0 0 14px'}}>📂 Ожидают обработки</h2>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(210px,1fr))',gap:12}}>
+              {unprocessed.map(b=>(
+                <div key={b.filePath} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:16,boxShadow:'0 1px 3px rgba(0,0,0,0.05)'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+                    <span style={{width:9,height:9,borderRadius:'50%',background:'#94a3b8',display:'inline-block',flexShrink:0}}/>
+                    <span style={{fontSize:14,fontWeight:600,color:'#0f172a'}}>{b.subject}</span>
+                  </div>
+                  <div style={{fontSize:12,color:'#64748b',marginBottom:12}}>{b.fileType.toUpperCase()} · {b.sizeMb}MB</div>
+                  <button onClick={()=>enqueue(b)} style={{
+                    width:'100%',height:32,borderRadius:8,fontSize:13,fontWeight:600,
+                    background:'#6366f1',color:'#fff',border:'none',cursor:'pointer',
+                  }}>▶ Обработать</button>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Queue */}
+        {jobs.length>0&&(
+          <section>
+            <h2 style={{fontSize:15,fontWeight:700,color:'#0f172a',margin:'0 0 14px'}}>⚙️ Очередь обработки</h2>
+            <div style={{display:'flex',flexDirection:'column',gap:12}}>
+              {jobs.map(job=>{
+                const isExp = job.id===expanded;
+                const pct = job.total_chapters>0?Math.round(job.done_chapters/job.total_chapters*100):0;
+                const col = C[job.status]??'#94a3b8';
+                return (
+                  <div key={job.id} style={{
+                    background:'#fff',borderRadius:16,overflow:'hidden',
+                    border:`1px solid ${isExp?'#6366f1':'#e2e8f0'}`,
+                    boxShadow:isExp?'0 0 0 3px rgba(99,102,241,0.12)':'0 1px 3px rgba(0,0,0,0.05)',
+                    transition:'all 0.15s',
+                  }}>
+
+                    {/* Header */}
+                    <div onClick={()=>selectJob(job.id)} style={{padding:'16px 20px',cursor:'pointer',display:'flex',alignItems:'center',gap:12}}>
+                      <span style={{
+                        width:11,height:11,borderRadius:'50%',background:col,display:'inline-block',flexShrink:0,
+                        boxShadow:job.status==='running'?`0 0 0 4px ${col}30`:'none',
+                      }}/>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:700,fontSize:15,color:'#0f172a',marginBottom:2}}>{job.subject}</div>
+                        <div style={{fontSize:12,color:'#64748b'}}>
+                          {job.file_type.toUpperCase()}{job.is_image_based?' · сканирован':' · текстовый'} · {job.total_pages} стр. · {job.book_name}
+                        </div>
+                      </div>
+                      <div style={{textAlign:'right',flexShrink:0,marginRight:12}}>
+                        <div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{job.done_chapters}/{job.total_chapters} глав</div>
+                        <div style={{fontSize:12,color:'#64748b'}}>{job.total_chunks} чанков</div>
+                      </div>
+                      <div style={{width:90,flexShrink:0}}>
+                        <div style={{display:'flex',justifyContent:'space-between',marginBottom:5}}>
+                          <span style={{fontSize:11,color:col,fontWeight:700}}>{pct}%</span>
+                          <span style={{fontSize:11,color:'#94a3b8',textTransform:'capitalize'}}>{job.status}</span>
+                        </div>
+                        <div style={{height:6,background:'#f1f5f9',borderRadius:99,overflow:'hidden'}}>
+                          <div style={{height:'100%',width:`${pct}%`,background:col,borderRadius:99,transition:'width 0.4s'}}/>
+                        </div>
+                      </div>
+                      <span style={{color:'#94a3b8',fontSize:12,flexShrink:0}}>{isExp?'▲':'▼'}</span>
+                    </div>
+
+                    {/* Actions */}
+                    <div style={{padding:'0 20px 14px',display:'flex',gap:8,flexWrap:'wrap'}}>
+                      {['queued','error','paused'].includes(job.status)&&(
+                        <button onClick={()=>action(job.id,'start')} style={btn('#22c55e')}>▶ Запустить</button>
+                      )}
+                      {job.status==='running'&&(
+                        <button onClick={()=>action(job.id,'pause')} style={btn('#f59e0b')}>⏸ Пауза</button>
+                      )}
+                      {job.status==='error'&&(
+                        <button onClick={()=>action(job.id,'retry')} style={btn('#3b82f6')}>↻ Повторить ошибки</button>
+                      )}
+                      <button onClick={()=>action(job.id,'rerun')} style={btn('#64748b')}>⟳ Заново</button>
+                      {job.error_message&&(
+                        <span style={{fontSize:12,color:'#ef4444',alignSelf:'center',marginLeft:4}}>⚠ {job.error_message.slice(0,80)}</span>
+                      )}
+                    </div>
+
+                    {/* Expanded detail */}
+                    {isExp&&(
+                      <div style={{borderTop:'1px solid #f1f5f9'}}>
+
+                        {/* Pipeline steps (while running) */}
+                        {isRunning&&curStep>=0&&(
+                          <div style={{padding:'16px 20px',borderBottom:'1px solid #f1f5f9',display:'flex',gap:8}}>
+                            {STEPS.map((name,i)=>{
+                              const s = i<curStep?'done':i===curStep?'running':'pending';
+                              return (
+                                <div key={name} style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:8}}>
+                                  <div style={{
+                                    width:34,height:34,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
+                                    background:s==='done'?'#22c55e':s==='running'?'#3b82f6':'#e2e8f0',
+                                    color:s==='pending'?'#94a3b8':'#fff',fontSize:14,fontWeight:700,
+                                    boxShadow:s==='running'?'0 0 0 6px rgba(59,130,246,0.2)':'none',
+                                    transition:'all 0.3s',
+                                  }}>{s==='done'?'✓':i+1}</div>
+                                  <span style={{fontSize:11,color:'#64748b',textAlign:'center',lineHeight:1.3}}>{name}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {/* Chapter grid */}
+                        <div style={{padding:'16px 20px',borderBottom:'1px solid #f1f5f9'}}>
+                          <div style={{fontSize:13,fontWeight:600,color:'#475569',marginBottom:12}}>
+                            Главы · {chapters.length}/{expJob?.total_chapters??'?'} загружено
+                          </div>
+                          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(115px,1fr))',gap:8}}>
+                            {chapters.map(ch=>{
+                              const c = C[ch.status]??'#94a3b8';
+                              return (
+                                <div key={ch.chapter_index} style={{
+                                  border:`1px solid ${c}50`,borderRadius:10,padding:'9px 11px',
+                                  background:`${c}08`,
+                                }}>
+                                  <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:4}}>
+                                    <span style={{width:7,height:7,borderRadius:'50%',background:c,display:'inline-block'}}/>
+                                    <span style={{fontSize:12,fontWeight:700,color:'#0f172a'}}>Гл.{ch.chapter_index}</span>
+                                  </div>
+                                  <div style={{fontSize:10,color:'#64748b',overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{ch.chapter_title}</div>
+                                  {ch.chunks_count>0&&<div style={{fontSize:10,color:c,fontWeight:700,marginTop:3}}>{ch.chunks_count} чанков</div>}
+                                  {ch.error_message&&<div style={{fontSize:10,color:'#ef4444',marginTop:2}} title={ch.error_message}>⚠ ошибка</div>}
+                                </div>
+                              );
+                            })}
+                            {expJob&&chapters.length<expJob.total_chapters&&
+                              Array.from({length:expJob.total_chapters-chapters.length},(_,i)=>(
+                                <div key={`p${i}`} style={{border:'1px solid #e2e8f0',borderRadius:10,padding:'9px 11px',background:'#f8fafc'}}>
+                                  <div style={{display:'flex',alignItems:'center',gap:5}}>
+                                    <span style={{width:7,height:7,borderRadius:'50%',background:'#cbd5e1',display:'inline-block'}}/>
+                                    <span style={{fontSize:12,fontWeight:700,color:'#94a3b8'}}>Гл.{chapters.length+i+1}</span>
+                                  </div>
+                                  <div style={{fontSize:10,color:'#cbd5e1',marginTop:4}}>ожидает</div>
+                                </div>
+                              ))
+                            }
+                          </div>
+                        </div>
+
+                        {/* Live log terminal */}
+                        <div>
+                          <div style={{
+                            padding:'10px 20px',display:'flex',alignItems:'center',gap:8,
+                            background:'#0f172a',borderBottom:'1px solid #1e293b',
+                          }}>
+                            <span style={{width:10,height:10,borderRadius:'50%',background:'#ef4444',display:'inline-block'}}/>
+                            <span style={{width:10,height:10,borderRadius:'50%',background:'#f59e0b',display:'inline-block'}}/>
+                            <span style={{width:10,height:10,borderRadius:'50%',background:'#22c55e',display:'inline-block'}}/>
+                            <span style={{fontSize:12,color:'#475569',marginLeft:6,fontFamily:'var(--font-mono)'}}>
+                              Live Log — {expJob?.book_name}
+                            </span>
+                            <span style={{marginLeft:'auto',fontSize:11,color:'#334155'}}>{events.length} событий</span>
+                          </div>
+                          <div ref={logRef} style={{
+                            height:300,overflowY:'auto',background:'#0f172a',
+                            padding:'14px 20px',fontFamily:'var(--font-mono)',fontSize:12.5,
+                            display:'flex',flexDirection:'column',gap:4,
+                          }}>
+                            {events.length===0?(
+                              <span style={{color:'#334155'}}>// Ожидаю события от воркера...</span>
+                            ):events.slice(-300).map(e=>(
+                              <div key={e.id} style={{display:'flex',gap:14,lineHeight:1.6}}>
+                                <span style={{color:'#334155',flexShrink:0,fontFamily:'var(--font-mono)'}}>{fmt(e.ts)}</span>
+                                <span style={{
+                                  color:e.level==='ok'?'#22c55e':e.level==='error'?'#ef4444':e.level==='warn'?'#f59e0b':'#94a3b8',
+                                  wordBreak:'break-word',
+                                }}>{e.msg}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Empty state */}
+        {jobs.length===0&&ragList.length===0&&(
+          <div style={{textAlign:'center',padding:'80px 24px',color:'#94a3b8'}}>
+            <div style={{fontSize:56,marginBottom:16}}>📭</div>
+            <div style={{fontSize:18,fontWeight:600,color:'#475569',marginBottom:8}}>Книг пока нет</div>
+            <div style={{fontSize:14}}>Загрузи первый PDF или EPUB через форму выше</div>
+          </div>
+        )}
+
       </main>
-    </>
+
+      <style>{`
+        @keyframes pulse {
+          0%,100% { transform:scale(1); opacity:1; }
+          50%      { transform:scale(1.15); opacity:0.8; }
+        }
+        *{box-sizing:border-box;}
+        button:hover{filter:brightness(1.08);}
+        ::-webkit-scrollbar{width:5px;}
+        ::-webkit-scrollbar-track{background:#1e293b;}
+        ::-webkit-scrollbar-thumb{background:#334155;border-radius:3px;}
+      `}</style>
+    </div>
   );
 }
