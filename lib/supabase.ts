@@ -376,22 +376,24 @@ export async function deleteChunksBySubject(subject: string): Promise<number> {
 
 /** View chunks for a subject (without embeddings — too large to send). */
 export interface ChunkRow {
-  id: number;
+  id: string;
   subject: string;
   topic: string;
   content: string;
   content_hash: string;
   metadata: Record<string, unknown>;
-  created_at: string;
 }
 
 export async function getChunksBySubject(subject: string): Promise<ChunkRow[]> {
   const { data, error } = await getSupabase()
     .from('dim_textbooks_vector')
-    .select('id, subject, topic, content, content_hash, metadata, created_at')
+    .select('id, subject, topic, content, content_hash, metadata')
     .eq('subject', subject)
-    .order('id', { ascending: true });
-  if (error) return [];
+    .order('topic', { ascending: true });
+  if (error) {
+    console.error('[getChunksBySubject] error:', error.message);
+    return [];
+  }
   return (data ?? []) as ChunkRow[];
 }
 

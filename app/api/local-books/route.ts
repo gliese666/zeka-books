@@ -97,8 +97,11 @@ export async function GET() {
           countMap[row.subject] = (countMap[row.subject] ?? 0) + 1;
         }
         for (const book of books) {
-          // Take count from stripped subject OR full folder name, whichever has data
-          book.ragReadyCount = (countMap[book.subject] ?? 0) + (countMap[book.folder] ?? 0);
+          // Use only the normalized subject (canonical key), never add folder name on top
+          // Fallback to folder name only when canonical subject has 0 (migration period)
+          const bySubject = countMap[book.subject] ?? 0;
+          const byFolder  = countMap[book.folder]  ?? 0;
+          book.ragReadyCount = bySubject > 0 ? bySubject : byFolder;
         }
       }
     }

@@ -25,9 +25,9 @@ interface Evt {
   level: 'ok' | 'info' | 'warn' | 'error'; type: string | null; msg: string;
 }
 interface Chunk {
-  id: number; subject: string; topic: string;
+  id: string; subject: string; topic: string;
   content: string; content_hash: string;
-  metadata: Record<string, unknown>; created_at: string;
+  metadata: Record<string, unknown>;
 }
 interface LocalBook {
   folder: string; subject: string; filePath: string;
@@ -74,6 +74,7 @@ export default function Dashboard() {
   const [uploadMsg, setUploadMsg] = useState<{ok:boolean;text:string}|null>(null);
   const [hint, setHint]           = useState('');
   const [confirmHard, setConfirmHard] = useState<string|null>(null);
+  const [legacyChunks, setLegacyChunks] = useState<{subject:string;chunks:Chunk[]}|null>(null);
   const cursor = useRef(0);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -187,6 +188,14 @@ export default function Dashboard() {
     setChunks(null); setChunksId(null);
   },[]);
 
+  // Load chunks for a legacy book (no job record) by subject
+  const loadLegacyChunks = useCallback(async (subject: string) => {
+    if (legacyChunks?.subject === subject) { setLegacyChunks(null); return; }
+    const r = await fetch(`/api/chunks?subject=${encodeURIComponent(subject)}`);
+    const d = await r.json();
+    setLegacyChunks({ subject, chunks: d.chunks ?? [] });
+  }, [legacyChunks]);
+
   // Derived
   const expJob    = jobs.find(j=>j.id===expanded)??null;
   const lastEv    = events[events.length-1];
@@ -197,6 +206,8 @@ export default function Dashboard() {
   const activeJobs   = jobs.filter(j=>j.status!=='archived');
   const archivedJobs = jobs.filter(j=>j.status==='archived');
   const unprocessed  = local.filter(b=>b.ragReadyCount===0);
+  // Legacy: subjects in RAG that have no job record at all
+  const legacySubjects = ragList.filter(([subj]) => !jobs.some(j=>j.subject===subj));
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -237,6 +248,13 @@ export default function Dashboard() {
       }}>
         <div style={{maxWidth:1140,margin:'0 auto',width:'100%',display:'flex',alignItems:'center',gap:16}}>
           <span style={{fontFamily:'var(--font-display)',fontWeight:700,fontSize:17,color:'#f8fafc'}}>📚 Zeka Books</span>
+          <a href="/" style={{fontSize:13,color:'#e2e8f0',fontWeight:600,textDecoration:'none'}}>🏠 Дашборд</a>
+          <a href="/errors" style={{
+            fontSize:13,fontWeight:600,textDecoration:'none',
+            color:stats?.errors&&stats.errors>0?'#fca5a5':'#94a3b8',
+          }}>
+            🐛 Ошибки{stats?.errors&&stats.errors>0?` (${stats.errors})`:''}
+          </a>
           <span style={{flex:1}}/>
           <span style={{display:'flex',alignItems:'center',gap:6}}>
             <span style={{
@@ -254,25 +272,32 @@ export default function Dashboard() {
 
         {/* Stats */}
         <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:28}}>
-          {[
-            {icon:'📚',label:'Книг в RAG',    val:stats?.totalBooks??'—', color:'#6366f1'},
-            {icon:'🧩',label:'Чанков в базе', val:stats?.totalChunks??'—',color:'#0ea5e9'},
-            {icon:'⚡',label:'В обработке',   val:stats?.running??0,      color:'#f59e0b'},
-            {icon:'🗄',label:'В архиве',      val:archivedJobs.length,    color:'#8b5cf6'},
-          ].map(s=>(
-            <div key={s.label} style={{
-              background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,
-              padding:'18px 20px',display:'flex',alignItems:'center',gap:14,
-              boxShadow:'0 1px 3px rgba(0,0,0,0.06)',
-            }}>
-              <span style={{width:44,height:44,borderRadius:12,display:'flex',alignItems:'center',
-                justifyContent:'center',fontSize:20,background:`${s.color}18`,flexShrink:0}}>{s.icon}</span>
-              <div>
-                <div style={{fontSize:24,fontWeight:700,lineHeight:1,color:'#0f172a'}}>{s.val}</div>
-                <div style={{fontSize:12,color:'#64748b',marginTop:3}}>{s.label}</div>
+          {([
+            {icon:'📚',label:'Книг в RAG',    val:stats?.totalBooks??'—', color:'#6366f1', href:null       } as const,
+            {icon:'🧩',label:'Чанков в базе', val:stats?.totalChunks??'—',color:'#0ea5e9', href:null       } as const,
+            {icon:'⚡',label:'В обработке',   val:stats?.running??0,      color:'#f59e0b', href:null       } as const,
+            {icon:'❌',label:'С ошибками',    val:stats?.errors??0,       color:'#ef4444', href:'/errors'  } as const,
+          ] as {icon:string;label:string;val:number|string;color:string;href:string|null}[]).map(s=>{
+            const hasErr = s.label==='С ошибками' && Number(s.val)>0;
+            const inner = (
+              <div key={s.label} style={{
+                background:'#fff',
+                border:`1px solid ${hasErr?'#fecaca':'#e2e8f0'}`,
+                borderRadius:14,padding:'18px 20px',display:'flex',alignItems:'center',gap:14,
+                boxShadow:'0 1px 3px rgba(0,0,0,0.06)',cursor:s.href?'pointer':'default',
+              }}>
+                <span style={{width:44,height:44,borderRadius:12,display:'flex',alignItems:'center',
+                  justifyContent:'center',fontSize:20,background:`${s.color}18`,flexShrink:0}}>{s.icon}</span>
+                <div>
+                  <div style={{fontSize:24,fontWeight:700,lineHeight:1,color:hasErr?'#ef4444':'#0f172a'}}>{s.val}</div>
+                  <div style={{fontSize:12,color:'#64748b',marginTop:3}}>{s.label}</div>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+            return s.href
+              ? <a key={s.label} href={s.href} style={{textDecoration:'none'}}>{inner}</a>
+              : <div key={s.label}>{inner}</div>;
+          })}
         </div>
 
         {/* Upload */}
@@ -303,33 +328,6 @@ export default function Dashboard() {
             border:`1px solid ${uploadMsg.ok?'#bbf7d0':'#fecaca'}`}}>{uploadMsg.text}</div>}
         </div>
 
-        {/* Books in RAG */}
-        {ragList.length>0&&(
-          <section style={{marginBottom:28}}>
-            <h2 style={{fontSize:15,fontWeight:700,color:'#0f172a',margin:'0 0 14px'}}>📖 Книги в RAG</h2>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(210px,1fr))',gap:12}}>
-              {ragList.map(([subj,cnt])=>{
-                const lb = local.find(b=>b.subject===subj);
-                return (
-                  <div key={subj} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,
-                    padding:16,boxShadow:'0 1px 3px rgba(0,0,0,0.05)'}}>
-                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
-                      <span style={{width:9,height:9,borderRadius:'50%',background:'#22c55e',display:'inline-block',flexShrink:0}}/>
-                      <span style={{fontSize:14,fontWeight:600,color:'#0f172a',lineHeight:1.3}}>{subj}</span>
-                    </div>
-                    <div style={{fontSize:12,color:'#64748b',marginBottom:10}}>
-                      {lb?`${lb.fileType.toUpperCase()} · ${lb.sizeMb}MB · `:''}<b style={{color:'#0f172a'}}>{cnt}</b> чанков
-                    </div>
-                    <div style={{height:5,background:'#f1f5f9',borderRadius:99}}>
-                      <div style={{height:'100%',width:'100%',background:'#22c55e',borderRadius:99}}/>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
-
         {/* Unprocessed */}
         {unprocessed.length>0&&(
           <section style={{marginBottom:28}}>
@@ -352,13 +350,90 @@ export default function Dashboard() {
           </section>
         )}
 
-        {/* Active Queue */}
-        {activeJobs.length>0&&(
+        {/* All books (unified) */}
+        {(activeJobs.length>0||legacySubjects.length>0)&&(
           <section style={{marginBottom:28}}>
-            <h2 style={{fontSize:15,fontWeight:700,color:'#0f172a',margin:'0 0 14px'}}>⚙️ Очередь обработки</h2>
-            <JobList jobs={activeJobs} expanded={expanded} expJob={expJob} chapters={chapters}
+            <h2 style={{fontSize:15,fontWeight:700,color:'#0f172a',margin:'0 0 14px',display:'flex',alignItems:'center',gap:10}}>
+              📚 Книги
+              <span style={{fontSize:12,fontWeight:400,color:'#94a3b8'}}>— нажмите на книгу для управления</span>
+            </h2>
+
+            {/* Legacy books (in RAG but no job record) */}
+            {legacySubjects.map(([subj,cnt])=>{
+              const showLC = legacyChunks?.subject===subj;
+              const lb = local.find(b=>b.subject===subj);
+              return (
+                <div key={subj} style={{
+                  background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,
+                  marginBottom:12,overflow:'hidden',
+                  boxShadow:'0 1px 3px rgba(0,0,0,0.05)',
+                }}>
+                  <div style={{padding:'16px 20px',display:'flex',alignItems:'center',gap:12}}>
+                    <span style={{width:11,height:11,borderRadius:'50%',background:'#22c55e',display:'inline-block',flexShrink:0}}/>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:15,color:'#0f172a',marginBottom:2}}>{subj}</div>
+                      <div style={{fontSize:12,color:'#64748b'}}>
+                        {lb?`${lb.fileType.toUpperCase()} · ${lb.sizeMb}MB · `:''}
+                        <b style={{color:'#22c55e'}}>{cnt} чанков в RAG</b>
+                        <span style={{marginLeft:8,fontSize:10,color:'#94a3b8',background:'#f1f5f9',padding:'2px 7px',borderRadius:99}}>
+                          нет записи в очереди
+                        </span>
+                      </div>
+                    </div>
+                    <div style={{height:6,width:90,background:'#f1f5f9',borderRadius:99,overflow:'hidden',flexShrink:0}}>
+                      <div style={{height:'100%',width:'100%',background:'#22c55e',borderRadius:99}}/>
+                    </div>
+                  </div>
+                  <div style={{padding:'0 20px 14px',display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+                    <button onClick={()=>loadLegacyChunks(subj)} style={btn('#0ea5e9')}>
+                      {showLC?'✕ Скрыть чанки':'🔍 Просмотр чанков'}
+                    </button>
+                    {lb&&<button onClick={()=>enqueue(lb)} style={btn('#6366f1')}>
+                      ↻ Переобработать
+                    </button>}
+                    <span style={{fontSize:11,color:'#94a3b8'}}>
+                      Управление: загрузи книгу повторно или используй ↻ Переобработать
+                    </span>
+                  </div>
+                  {showLC&&legacyChunks&&(
+                    <div style={{borderTop:'1px solid #e2e8f0'}}>
+                      <div style={{padding:'12px 20px',background:'#f8fafc',borderBottom:'1px solid #e2e8f0',display:'flex',alignItems:'center',gap:10}}>
+                        <span style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>🧩 Чанки в RAG</span>
+                        <span style={{fontSize:12,color:'#64748b'}}>{legacyChunks.chunks.length} записей · {subj}</span>
+                      </div>
+                      <div style={{maxHeight:400,overflowY:'auto'}}>
+                        {legacyChunks.chunks.map((ch,i)=>(
+                          <div key={ch.id} style={{padding:'12px 20px',borderBottom:'1px solid #f1f5f9',
+                            background:i%2===0?'#fff':'#fafafa'}}>
+                            <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
+                              <span style={{fontSize:11,color:'#94a3b8',fontFamily:'var(--font-mono)',flexShrink:0}}>#{ch.id}</span>
+                              <span style={{fontSize:13,fontWeight:600,color:'#0f172a'}}>{ch.topic}</span>
+                              <span style={{marginLeft:'auto',fontSize:10,color:'#94a3b8',fontFamily:'var(--font-mono)'}}>{ch.content_hash.slice(0,8)}</span>
+                            </div>
+                            <div style={{fontSize:12,color:'#475569',lineHeight:1.6,
+                              overflow:'hidden',display:'-webkit-box',WebkitLineClamp:3,WebkitBoxOrient:'vertical'}}>
+                              {ch.content}
+                            </div>
+                            <div style={{display:'flex',gap:12,marginTop:6,flexWrap:'wrap'}}>
+                              {ch.metadata?.bloom_level!=null&&<span style={{fontSize:10,color:'#6366f1',background:'#eef2ff',padding:'2px 8px',borderRadius:99}}>bloom: {String(ch.metadata.bloom_level)}</span>}
+                              {ch.metadata?.difficulty!=null&&<span style={{fontSize:10,color:'#0ea5e9',background:'#f0f9ff',padding:'2px 8px',borderRadius:99}}>diff: {String(ch.metadata.difficulty)}/5</span>}
+                              {Array.isArray(ch.metadata?.concepts)&&(ch.metadata.concepts as string[]).slice(0,3).map(c=>(
+                                <span key={c} style={{fontSize:10,color:'#64748b',background:'#f1f5f9',padding:'2px 8px',borderRadius:99}}>{c}</span>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Books with job records (full management) */}
+            {activeJobs.length>0&&<JobList jobs={activeJobs} expanded={expanded} expJob={expJob} chapters={chapters}
               events={events} curStep={curStep} isRunning={isRunning} chunksJobId={chunksJobId}
-              chunks={chunks} logRef={logRef} onSelect={selectJob} onAction={doAction} onChunks={loadChunks}/>
+              chunks={chunks} logRef={logRef} onSelect={selectJob} onAction={doAction} onChunks={loadChunks}/>}
           </section>
         )}
 
@@ -376,7 +451,7 @@ export default function Dashboard() {
         )}
 
         {/* Empty */}
-        {activeJobs.length===0&&archivedJobs.length===0&&ragList.length===0&&(
+        {activeJobs.length===0&&archivedJobs.length===0&&legacySubjects.length===0&&(
           <div style={{textAlign:'center',padding:'80px 24px',color:'#94a3b8'}}>
             <div style={{fontSize:56,marginBottom:16}}>📭</div>
             <div style={{fontSize:18,fontWeight:600,color:'#475569',marginBottom:8}}>Книг пока нет</div>
