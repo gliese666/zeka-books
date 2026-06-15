@@ -152,6 +152,8 @@ export default function Dashboard() {
       const res = await fetch('/api/upload-pdf',{method:'POST',body:fd});
       const data = await res.json();
       if (!res.ok){ setUploadMsg({ok:false,text:data.error??'Ошибка'}); return; }
+      // Auto-start: move from pending_parse → queued so worker picks it up
+      await fetch(`/api/jobs/${data.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})});
       setUploadMsg({ok:true,text:`✅ "${data.subject}" — поставлен в очередь`});
       setExpanded(data.id); setEvents([]); cursor.current=0; setHint('');
       fetch('/api/local-books').then(r=>r.json()).then(d=>setLocal(d.books??[]));
@@ -168,7 +170,11 @@ export default function Dashboard() {
     const res = await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({filePath:b.filePath,subject:b.subject})});
     const j = await res.json();
-    if (res.ok&&j?.id){ setExpanded(j.id); setEvents([]); cursor.current=0; }
+    if (res.ok&&j?.id){
+      // Auto-start: move from pending_parse → queued so worker picks it up
+      await fetch(`/api/jobs/${j.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})});
+      setExpanded(j.id); setEvents([]); cursor.current=0;
+    }
   },[]);
 
   const doAction = useCallback(async (id:string, a:string) => {
@@ -563,7 +569,7 @@ function JobList({jobs,expanded,expJob,chapters,events,curStep,isRunning,
                 </>
               ) : (
                 <>
-                  {['queued','error','paused','done'].includes(job.status)&&(
+                  {['pending_parse','queued','error','paused','done'].includes(job.status)&&(
                     <button onClick={()=>onAction(job.id,'start')} style={btn('#22c55e')}>▶ Запустить</button>
                   )}
                   {job.status==='running'&&(
