@@ -305,21 +305,27 @@ export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
   const jobs = (data ?? []) as BookJob[];
   if (!jobs.length) return [];
 
-  // Enrich with per-job progress from chapter checkpoints (one query).
+  // Enrich with per-job progress from chapter checkpoints.
+  // Group by book_name (not job_id) so chapters processed in a previous run
+  // (with a different job_id) are still counted correctly.
   const { data: sess } = await getSupabase()
     .from('book_processing_sessions')
-    .select('job_id, status, chunks_count')
-    .in('job_id', jobs.map((j) => j.id));
+    .select('book_name, status, chunks_count')
+    .in('book_name', jobs.map((j) => j.book_name));
 
   const done: Record<string, number> = {};
   const chunks: Record<string, number> = {};
   for (const s of sess ?? []) {
-    if (!s.job_id) continue;
-    if (s.status === 'done') done[s.job_id] = (done[s.job_id] ?? 0) + 1;
-    chunks[s.job_id] = (chunks[s.job_id] ?? 0) + (s.chunks_count ?? 0);
+    if (!s.book_name) continue;
+    if (s.status === 'done') done[s.book_name] = (done[s.book_name] ?? 0) + 1;
+    chunks[s.book_name] = (chunks[s.book_name] ?? 0) + (s.chunks_count ?? 0);
   }
 
-  return jobs.map((j) => ({ ...j, done_chapters: done[j.id] ?? 0, total_chunks: chunks[j.id] ?? 0 }));
+  return jobs.map((j) => ({
+    ...j,
+    done_chapters: done[j.book_name] ?? 0,
+    total_chunks: chunks[j.book_name] ?? 0,
+  }));
 }
 
 export async function getJob(id: string): Promise<BookJob | null> {
