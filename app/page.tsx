@@ -184,8 +184,12 @@ export default function Dashboard() {
   },[]);
 
   const deleteJob = useCallback(async (id: string) => {
-    await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
+    // Optimistic: remove from UI immediately, don't wait for server
+    setJobs(prev => prev.filter(j => j.id !== id));
     if (expanded === id) { setExpanded(null); setEvents([]); cursor.current = 0; }
+    await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
+    // Refresh local-books so legacy section also updates
+    fetch('/api/local-books').then(r=>r.json()).then(d=>setLocal(d.books??[]));
   }, [expanded]);
 
   const selectJob = useCallback((id:string) => {
