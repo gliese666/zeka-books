@@ -202,8 +202,8 @@ async function extractTextViaVision(
   chapterTitle: string,
   images: import('@/lib/extract/epub').PageImage[]
 ): Promise<string> {
-  // Use Gemini Vision just for OCR (extract text only, no chunking)
   const GEMINI_KEY = process.env.GEMINI_API_KEY!;
+  const MODELS = ['gemini-3.5-flash', 'gemini-3.1-pro-preview'] as const;
   const parts = [
     { text: 'Прочитай текст со всех изображений и верни только plain text (без форматирования), сохраняя структуру страниц.\n\n' },
     ...images.map(img => ({
@@ -212,19 +212,33 @@ async function extractTextViaVision(
     { text: 'Верни только текст страниц.' },
   ];
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ role: 'user', parts }] }),
-      signal: AbortSignal.timeout(120_000),
-    }
-  );
+  for (let m = 0; m < MODELS.length; m++) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODELS[m]}:generateContent?key=${GEMINI_KEY}`;
+    const MAX_RETRIES = m === 0 ? 3 : 2;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ role: 'user', parts }] }),
+        signal: AbortSignal.timeout(120_000),
+      });
 
-  if (!res.ok) throw new Error(`Vision OCR failed: ${res.status}`);
-  const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      if (res.ok) {
+        const data = await res.json();
+        return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      }
+
+      const isRetryable = res.status === 429 || res.status >= 500;
+      if (isRetryable && attempt < MAX_RETRIES - 1) {
+        const wait = res.status === 429 ? 30_000 : 15_000 * (attempt + 1);
+        await sleep(wait);
+        continue;
+      }
+      break; // try next model
+    }
+  }
+
+  throw new Error(`Vision OCR failed after retries on all models`);
 }
 
 async function geminiTextChunk(
