@@ -15,7 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getJob, getBookSessions, updateJobStatus,
-  resetFailedChapters, resetAllChapters, deleteChunksBySubject,
+  resetFailedChapters, resetAllChapters, deleteChunksBySubject, deleteJob,
 } from '@/lib/supabase';
 
 export const dynamic = 'force-dynamic';
@@ -26,6 +26,18 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
   if (!job) return NextResponse.json({ error: 'Job не найден' }, { status: 404 });
   const chapters = await getBookSessions(job.book_name);
   return NextResponse.json({ job, chapters });
+}
+
+/** DELETE /api/jobs/[id] — удалить задание (только если не running). */
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const { id } = await ctx.params;
+  const job = await getJob(id);
+  if (!job) return NextResponse.json({ error: 'Job не найден' }, { status: 404 });
+  if (job.status === 'running') {
+    return NextResponse.json({ error: 'Нельзя удалить задание в процессе обработки' }, { status: 409 });
+  }
+  await deleteJob(id);
+  return NextResponse.json({ ok: true });
 }
 
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {

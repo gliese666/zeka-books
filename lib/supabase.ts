@@ -268,6 +268,14 @@ export async function updateJobAfterParse(
   if (error) throw new Error(`updateJobAfterParse error: ${error.message}`);
 }
 
+export async function deleteJob(id: string): Promise<void> {
+  const { error } = await getSupabase()
+    .from('book_jobs')
+    .delete()
+    .eq('id', id);
+  if (error) throw new Error(`deleteJob error: ${error.message}`);
+}
+
 export interface JobWithProgress extends BookJob {
   done_chapters: number;
   total_chunks: number;

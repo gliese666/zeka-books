@@ -183,6 +183,11 @@ export default function Dashboard() {
     setEvents([]); cursor.current=0;
   },[]);
 
+  const deleteJob = useCallback(async (id: string) => {
+    await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
+    if (expanded === id) { setExpanded(null); setEvents([]); cursor.current = 0; }
+  }, [expanded]);
+
   const selectJob = useCallback((id:string) => {
     setExpanded(p=>p===id?null:id); setEvents([]); cursor.current=0;
     setChunks(null); setChunksId(null);
@@ -433,7 +438,7 @@ export default function Dashboard() {
             {/* Books with job records (full management) */}
             {activeJobs.length>0&&<JobList jobs={activeJobs} expanded={expanded} expJob={expJob} chapters={chapters}
               events={events} curStep={curStep} isRunning={isRunning} chunksJobId={chunksJobId}
-              chunks={chunks} logRef={logRef} onSelect={selectJob} onAction={doAction} onChunks={loadChunks}/>}
+              chunks={chunks} logRef={logRef} onSelect={selectJob} onAction={doAction} onChunks={loadChunks} onDelete={deleteJob}/>}
           </section>
         )}
 
@@ -446,7 +451,7 @@ export default function Dashboard() {
             <JobList jobs={archivedJobs} expanded={expanded} expJob={expJob} chapters={chapters}
               events={events} curStep={curStep} isRunning={isRunning} chunksJobId={chunksJobId}
               chunks={chunks} logRef={logRef} onSelect={selectJob} onAction={doAction} onChunks={loadChunks}
-              isArchive/>
+              onDelete={deleteJob} isArchive/>
           </section>
         )}
 
@@ -481,11 +486,11 @@ interface JobListProps {
   isRunning: boolean; chunksJobId: string|null; chunks: Chunk[]|null;
   logRef: React.RefObject<HTMLDivElement|null>;
   onSelect:(id:string)=>void; onAction:(id:string,a:string)=>void;
-  onChunks:(id:string)=>void; isArchive?: boolean;
+  onChunks:(id:string)=>void; onDelete:(id:string)=>void; isArchive?: boolean;
 }
 
 function JobList({jobs,expanded,expJob,chapters,events,curStep,isRunning,
-  chunksJobId,chunks,logRef,onSelect,onAction,onChunks,isArchive}:JobListProps){
+  chunksJobId,chunks,logRef,onSelect,onAction,onChunks,onDelete,isArchive}:JobListProps){
   const fmt  = (iso: string) => new Date(iso).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   const fmtD = (iso: string) => new Date(iso).toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'});
   const STEPS = ['📦 Извлечение','🤖 Чанкинг AI','🔢 Эмбеддинги','💾 Supabase'];
@@ -566,6 +571,7 @@ function JobList({jobs,expanded,expJob,chapters,events,curStep,isRunning,
                   <button onClick={()=>onAction(job.id,'reset')} style={btn('#64748b')}>↺ Сброс</button>
                   <button onClick={()=>onAction(job.id,'hard-reset')} style={btn('#ef4444')}>🗑 Полный сброс</button>
                   <button onClick={()=>onAction(job.id,'archive')} style={btn('#8b5cf6')}>🗄 Архивировать</button>
+                  {job.status!=='running'&&<button onClick={()=>onDelete(job.id)} style={btn('#dc2626')}>🗑 Удалить</button>}
                   {job.status!=='running'&&<button onClick={()=>onChunks(job.id)} style={btn('#0ea5e9')}>
                     {showChunks?'✕ Чанки':'🔍 Чанки'}
                   </button>}
