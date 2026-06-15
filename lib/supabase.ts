@@ -31,7 +31,7 @@ export function getSupabaseAdmin(): SupabaseClient<any> { return getSupabase(); 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type SessionStatus = 'pending' | 'processing' | 'done' | 'error';
-export type JobStatus = 'queued' | 'running' | 'paused' | 'done' | 'error' | 'archived';
+export type JobStatus = 'pending_parse' | 'queued' | 'running' | 'paused' | 'done' | 'error' | 'archived';
 
 export interface ChapterMeta {
   title: string;
@@ -226,20 +226,46 @@ export interface NewJob {
   subject: string;
   file_path: string;
   file_type: 'epub' | 'pdf';
-  is_image_based: boolean;
   lang: string | null;
-  chapters: ChapterMeta[];
-  total_pages: number;
+  // Optional — if omitted, worker will parse the file (status → 'pending_parse')
+  is_image_based?: boolean;
+  chapters?: ChapterMeta[];
+  total_pages?: number;
 }
 
 export async function createJob(job: NewJob): Promise<BookJob> {
+  const hasMeta = (job.chapters?.length ?? 0) > 0;
   const { data, error } = await getSupabase()
     .from('book_jobs')
-    .insert({ ...job, total_chapters: job.chapters.length, status: 'queued' })
+    .insert({
+      ...job,
+      chapters: job.chapters ?? [],
+      total_chapters: job.chapters?.length ?? 0,
+      is_image_based: job.is_image_based ?? false,
+      total_pages: job.total_pages ?? 0,
+      status: hasMeta ? 'queued' : 'pending_parse',
+    })
     .select('*')
     .single();
   if (error) throw new Error(`createJob error: ${error.message}`);
   return data as BookJob;
+}
+
+export async function updateJobAfterParse(
+  id: string,
+  meta: { chapters: ChapterMeta[]; is_image_based: boolean; total_pages: number }
+): Promise<void> {
+  const { error } = await getSupabase()
+    .from('book_jobs')
+    .update({
+      chapters: meta.chapters,
+      total_chapters: meta.chapters.length,
+      is_image_based: meta.is_image_based,
+      total_pages: meta.total_pages,
+      status: 'queued',
+    })
+    .eq('id', id);
+  if (error) throw new Error(`updateJobAfterParse error: ${error.message}`);
 }
 
 export interface JobWithProgress extends BookJob {

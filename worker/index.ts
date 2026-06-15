@@ -12,10 +12,13 @@
 
 import fs from 'fs';
 import { processChapter, type PipelineEvent } from '@/lib/pipeline';
+import { parseEpub } from '@/lib/extract/epub';
+import { parsePdf } from '@/lib/extract/pdf';
 import {
   claimNextJob,
   getJob,
   updateJobStatus,
+  updateJobAfterParse,
   appendEvent,
   getBookSessions,
   resetStuckChapters,
@@ -46,8 +49,38 @@ function log(msg: string) {
 
 // ── Process one job end-to-end ─────────────────────────────────────────────────
 async function runJob(job: BookJob): Promise<void> {
-  log(`▶ Job ${job.id.slice(0, 8)} — ${job.book_name} (${job.subject}, ${job.total_chapters} глав)`);
+  log(`▶ Job ${job.id.slice(0, 8)} — ${job.book_name} (${job.subject})`);
   await appendEvent(job.id, { level: 'info', type: 'job_start', msg: `▶ Старт: ${job.book_name} — ${job.subject}` });
+
+  // ── Parse phase: если API не разбирал файл — делаем это здесь в фоне ────────
+  if (!job.chapters.length) {
+    await appendEvent(job.id, { level: 'info', type: 'extract_start', msg: '🔍 Определяю структуру книги (это займёт ~10с)...' });
+    if (!fs.existsSync(job.file_path)) {
+      const msg = `Файл не найден: ${job.file_path}`;
+      await appendEvent(job.id, { level: 'error', type: 'error', msg: `❌ ${msg}` });
+      await updateJobStatus(job.id, 'error', msg);
+      return;
+    }
+    const fileBuffer = fs.readFileSync(job.file_path);
+    const rawMeta = job.file_type === 'epub'
+      ? await parseEpub(fileBuffer)
+      : await parsePdf(fileBuffer);
+    const rawChapters = job.file_type === 'epub'
+      ? (rawMeta as Awaited<ReturnType<typeof parseEpub>>).chapters
+      : (rawMeta as Awaited<ReturnType<typeof parsePdf>>).suggestedChapters;
+    const meta = rawMeta;
+    const chapters = rawChapters.map((c) => ({ title: c.title, pageStart: c.pageStart, pageEnd: c.pageEnd }));
+    if (!chapters.length) {
+      const msg = 'Не удалось определить главы книги';
+      await appendEvent(job.id, { level: 'error', type: 'error', msg: `❌ ${msg}` });
+      await updateJobStatus(job.id, 'error', msg);
+      return;
+    }
+    await updateJobAfterParse(job.id, { chapters, is_image_based: meta.isImageBased, total_pages: meta.totalPages });
+    job = { ...job, chapters, total_chapters: chapters.length, is_image_based: meta.isImageBased };
+    await appendEvent(job.id, { level: 'ok', type: 'extract_done', msg: `✅ Структура определена: ${chapters.length} глав` });
+    log(`  Parsed ${chapters.length} chapters for job ${job.id.slice(0, 8)}`);
+  }
 
   // Recover any chapter left 'processing' by a previous crash.
   await resetStuckChapters(job.book_name);
@@ -58,7 +91,7 @@ async function runJob(job: BookJob): Promise<void> {
     await updateJobStatus(job.id, 'error', msg);
     return;
   }
-  const fileBuffer = fs.readFileSync(job.file_path);
+  const fileBuffer = fs.readFileSync(job.file_path); // OK: worker process, не блокирует UI
 
   // Map existing checkpoints for fast skip.
   const sessions = await getBookSessions(job.book_name);
