@@ -89,18 +89,39 @@ export async function extractEpubImages(
   pageEnd: number
 ): Promise<PageImage[]> {
   const zip = await JSZip.loadAsync(buffer);
+
+  // Build an index of all image files in the zip for fallback lookup
+  const allImagePaths = Object.keys(zip.files).filter(f => /\.(jpe?g|png)$/i.test(f));
+
   const images: PageImage[] = [];
 
   for (let pg = pageStart; pg <= pageEnd; pg++) {
-    // Try jpg first, then png
+    // 1. Try canonical path first
+    let found = false;
     for (const ext of ['jpg', 'jpeg', 'png']) {
-      const path = `OEBPS/assets/img/${pg}.${ext}`;
-      const file = zip.file(path);
+      const canonical = `OEBPS/assets/img/${pg}.${ext}`;
+      const file = zip.file(canonical);
       if (file) {
         const data = Buffer.from(await file.async('arraybuffer'));
         images.push({ pageNum: pg, mimeType: ext === 'png' ? 'image/png' : 'image/jpeg', data });
+        found = true;
         break;
       }
+    }
+    if (found) continue;
+
+    // 2. Fallback: search all images whose filename starts with or equals the page number
+    const pgStr = String(pg);
+    const match = allImagePaths.find(p => {
+      const base = p.split('/').pop()!;
+      const nameNoExt = base.replace(/\.[^.]+$/, '');
+      return nameNoExt === pgStr || nameNoExt === pgStr.padStart(3, '0') || nameNoExt === pgStr.padStart(4, '0');
+    });
+    if (match) {
+      const file = zip.file(match)!;
+      const data = Buffer.from(await file.async('arraybuffer'));
+      const isPng = match.toLowerCase().endsWith('.png');
+      images.push({ pageNum: pg, mimeType: isPng ? 'image/png' : 'image/jpeg', data });
     }
   }
 
