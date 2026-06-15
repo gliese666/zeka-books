@@ -529,7 +529,8 @@ function JobList({jobs,expanded,expJob,chapters,events,curStep,isRunning,
     <div style={{display:'flex',flexDirection:'column',gap:12}}>
       {jobs.map(job=>{
         const isExp = job.id===expanded;
-        const pct   = job.total_chapters>0?Math.round(job.done_chapters/job.total_chapters*100):0;
+        const doneChapters = job.status==='done' ? job.total_chapters : job.done_chapters;
+        const pct   = job.total_chapters>0?Math.round(doneChapters/job.total_chapters*100):0;
         const col   = C[job.status]??'#94a3b8';
         const showChunks = chunksJobId===job.id;
 
@@ -553,7 +554,7 @@ function JobList({jobs,expanded,expJob,chapters,events,curStep,isRunning,
                 </div>
               </div>
               <div style={{textAlign:'right',flexShrink:0,marginRight:12}}>
-                <div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{job.done_chapters}/{job.total_chapters} глав</div>
+                <div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{doneChapters}/{job.total_chapters} глав</div>
                 <div style={{fontSize:12,color:'#64748b'}}>{job.total_chunks} чанков</div>
               </div>
               <div style={{width:90,flexShrink:0}}>
