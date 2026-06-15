@@ -77,6 +77,7 @@ export default function Dashboard() {
   const [legacyChunks, setLegacyChunks] = useState<{subject:string;chunks:Chunk[]}|null>(null);
   const cursor = useRef(0);
   const logRef = useRef<HTMLDivElement>(null);
+  const deletedIds = useRef<Set<string>>(new Set());
 
   // Clock
   useEffect(()=>{
@@ -100,8 +101,9 @@ export default function Dashboard() {
           fetch('/api/jobs').then(r=>r.json()),
         ]);
         if (!alive) return;
-        setStats(s); setJobs(j);
-        const running = (j as Job[]).find(x=>x.status==='running');
+        setStats(s);
+        setJobs((j as Job[]).filter((x:Job) => !deletedIds.current.has(x.id)));
+        const running = (j as Job[]).find((x:Job)=>x.status==='running');
         if (running) setExpanded(id => id ?? running.id);
       } catch {}
     };
@@ -153,7 +155,7 @@ export default function Dashboard() {
       const data = await res.json();
       if (!res.ok){ setUploadMsg({ok:false,text:data.error??'Ошибка'}); return; }
       // Auto-start: move from pending_parse → queued so worker picks it up
-      await fetch(`/api/jobs/${data.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})});
+      try { await fetch(`/api/jobs/${data.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})}); } catch {}
       setUploadMsg({ok:true,text:`✅ "${data.subject}" — поставлен в очередь`});
       setExpanded(data.id); setEvents([]); cursor.current=0; setHint('');
       fetch('/api/local-books').then(r=>r.json()).then(d=>setLocal(d.books??[]));
@@ -172,7 +174,7 @@ export default function Dashboard() {
     const j = await res.json();
     if (res.ok&&j?.id){
       // Auto-start: move from pending_parse → queued so worker picks it up
-      await fetch(`/api/jobs/${j.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})});
+      try { await fetch(`/api/jobs/${j.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})}); } catch {}
       setExpanded(j.id); setEvents([]); cursor.current=0;
     }
   },[]);
@@ -190,11 +192,15 @@ export default function Dashboard() {
   },[]);
 
   const deleteJob = useCallback(async (id: string) => {
-    // Optimistic: remove from UI immediately, don't wait for server
+    deletedIds.current.add(id);
     setJobs(prev => prev.filter(j => j.id !== id));
     if (expanded === id) { setExpanded(null); setEvents([]); cursor.current = 0; }
-    await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
-    // Refresh local-books so legacy section also updates
+    try {
+      await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
+    } catch {
+      // If delete failed, remove from deletedIds so it reappears on next poll
+      deletedIds.current.delete(id);
+    }
     fetch('/api/local-books').then(r=>r.json()).then(d=>setLocal(d.books??[]));
   }, [expanded]);
 
