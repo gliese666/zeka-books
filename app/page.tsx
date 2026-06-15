@@ -420,7 +420,7 @@ export default function Dashboard() {
                     {lb&&<button onClick={()=>enqueue(lb)} style={btn('#6366f1')}>
                       ↻ Переобработать
                     </button>}
-                    <button onClick={()=>deleteLegacy(subj)} style={btn('#dc2626')}>🗑 Удалить</button>
+                    <button onClick={()=>deleteLegacy(subj)} style={btn('#dc2626')}>🗑 Очистить RAG</button>
                   </div>
                   {showLC&&legacyChunks&&(
                     <div style={{borderTop:'1px solid #e2e8f0'}}>
