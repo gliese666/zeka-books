@@ -1,16 +1,14 @@
 /**
  * POST /api/upload-pdf
- * Accepts multipart file upload (PDF or EPUB), saves to Books Labs folder,
- * parses metadata, and enqueues the job — all in one step.
+ * Saves uploaded PDF/EPUB to Books Labs folder and enqueues a job instantly.
+ * Heavy parsing (chapters, image detection) is done by the worker daemon.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
-import { parsePdf } from '@/lib/extract/pdf';
-import { parseEpub } from '@/lib/extract/epub';
-import { createJob } from '@/lib/supabase';
+import { createJob, findActiveJobByName } from '@/lib/supabase';
 import { normalizeSubject, subjectLang, folderName } from '@/lib/normalize';
 
 export const dynamic = 'force-dynamic';
@@ -33,48 +31,35 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Поддерживаются только PDF и EPUB' }, { status: 400 });
     }
 
-    const bytes  = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
+    const canonicalSubject = normalizeSubject(subjectHint || file.name.replace(/\.(epub|pdf)$/i, ''));
 
-    // Parse metadata before saving (fast, validates the file)
-    let title: string, isImageBased: boolean, totalPages: number;
-    let chapters: { title: string; pageStart: number; pageEnd: number }[];
-
-    if (isEpub) {
-      const m = await parseEpub(buffer);
-      title = m.title; isImageBased = m.isImageBased; totalPages = m.totalPages;
-      chapters = m.chapters.map((c) => ({ title: c.title, pageStart: c.pageStart, pageEnd: c.pageEnd }));
-    } else {
-      const m = await parsePdf(buffer);
-      title = m.title; isImageBased = m.isImageBased; totalPages = m.totalPages;
-      chapters = m.suggestedChapters.map((c) => ({ title: c.title, pageStart: c.pageStart, pageEnd: c.pageEnd }));
+    // ── Duplicate guard ───────────────────────────────────────────────────────
+    // If an active job for the same file already exists — return it, don't create another.
+    const existing = await findActiveJobByName(file.name);
+    if (existing) {
+      return NextResponse.json(existing, { status: 200 });
     }
 
-    if (!chapters.length) {
-      return NextResponse.json({ error: 'Не удалось определить главы в файле' }, { status: 422 });
-    }
-
-    const canonicalSubject = normalizeSubject(subjectHint || title);
-
-    // Save file to Books Labs/<subject> <aze|рус>/00_Raw/
-    const dir = path.join(BOOKS_DIR, folderName(canonicalSubject), '00_Raw');
+    // ── Save file (no parsing — worker handles it) ────────────────────────────
     if (!existsSync(BOOKS_DIR)) {
       return NextResponse.json({ error: `Books Labs папка не найдена: ${BOOKS_DIR}` }, { status: 500 });
     }
+
+    const dir = path.join(BOOKS_DIR, folderName(canonicalSubject), '00_Raw');
     await mkdir(dir, { recursive: true });
     const filePath = path.join(dir, file.name);
-    await writeFile(filePath, buffer);
 
-    // Create and enqueue job
+    const bytes = await file.arrayBuffer();
+    await writeFile(filePath, Buffer.from(bytes));
+
+    // ── Enqueue instantly (status = pending_parse) ────────────────────────────
     const job = await createJob({
       book_name: file.name,
       subject: canonicalSubject,
       file_path: filePath,
       file_type: isEpub ? 'epub' : 'pdf',
-      is_image_based: isImageBased,
       lang: subjectLang(canonicalSubject),
-      chapters,
-      total_pages: totalPages,
+      // chapters NOT passed → worker parses on first run
     });
 
     return NextResponse.json(job, { status: 201 });

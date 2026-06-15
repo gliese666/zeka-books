@@ -233,6 +233,20 @@ export interface NewJob {
   total_pages?: number;
 }
 
+/**
+ * Returns existing active job for the same book_name, or null.
+ * "Active" = not done/archived/error — prevents duplicate submissions.
+ */
+export async function findActiveJobByName(bookName: string): Promise<BookJob | null> {
+  const { data } = await getSupabase()
+    .from('book_jobs')
+    .select('*')
+    .eq('book_name', bookName)
+    .in('status', ['pending_parse', 'queued', 'running', 'paused'])
+    .maybeSingle();
+  return (data as BookJob | null) ?? null;
+}
+
 export async function createJob(job: NewJob): Promise<BookJob> {
   const hasMeta = (job.chapters?.length ?? 0) > 0;
   const { data, error } = await getSupabase()
