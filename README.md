@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Zeka Books — local-first сервис обработки учебников
 
-## Getting Started
+PDF / EPUB → Karpathy wiki-чанки → векторная база `dim_textbooks_vector` (Supabase).
+Отказоустойчивая обработка любых книг (текст и сканы) фоновым worker-демоном + дашборд в реальном времени.
 
-First, run the development server:
+## Архитектура
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```
+Dashboard (Next.js, localhost) ──enqueue──▶ Supabase (book_jobs) ◀──claim/process── Worker daemon
+        ▲ poll 1s (jobs + events)                   │                                    │ pdf-to-img → Gemini Vision/DeepSeek
+        └────────────────────────────────── book_processing_events / sessions ──────────┘ → embed → idempotent upsert
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- **Worker** не зависит от браузера и таймаутов. При крахе/рестарте — авто-resume с незавершённой главы.
+- **Идемпотентность**: `content_hash` + unique index `uq_dim_subject_hash` → повторная вставка чанка игнорируется.
+- **Контракт subject**: `lib/normalize.ts` (зеркало `project-zero/src/config/subjects.ts`).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Запуск (локально, без Vercel)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm install
+npm run dev:all     # поднимает Next.js (дашборд :3000) + worker одновременно
+```
 
-## Learn More
+Или по отдельности:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run dev         # только дашборд
+npm run worker      # только worker-демон
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Открой http://localhost:3000 → выбери книгу из «Локальные книги» → «В очередь».
+Worker подхватит задание; на дашборде видно статусы глав, шаги и живой лог.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Переменные окружения (`.env.local`)
 
-## Deploy on Vercel
+```
+GEMINI_API_KEY=...
+DEEPSEEK_API_KEY=...
+NEXT_PUBLIC_SUPABASE_URL=...
+SUPABASE_SERVICE_ROLE_KEY=...
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Схема БД
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`docs/sql/01_jobs_queue.sql` — `book_jobs`, `book_processing_events`, расширение `book_processing_sessions`.
+Применяется через Supabase Management API (project-zero).

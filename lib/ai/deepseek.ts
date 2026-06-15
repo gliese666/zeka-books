@@ -84,10 +84,13 @@ export async function deepseekChunk(
 
       if (!res.ok) {
         const errText = await res.text();
+        const is429 = res.status === 429;
         const isServer = res.status >= 500;
-        if (isServer && attempt < MAX_RETRIES - 1) {
-          const wait = 15_000 * Math.pow(3, attempt);
-          statusCb?.(`⚠️ DeepSeek ${res.status} — повтор через ${wait / 1000}s...`);
+        if ((is429 || isServer) && attempt < MAX_RETRIES - 1) {
+          // 429 = rate limit: exp backoff + jitter to avoid thundering herd
+          const base = is429 ? 20_000 : 15_000;
+          const wait = base * Math.pow(2, attempt) + Math.random() * 5_000;
+          statusCb?.(`⚠️ DeepSeek ${res.status} (${is429 ? 'rate limit' : 'server error'}) — повтор через ${Math.round(wait / 1000)}s...`);
           await sleep(wait);
           continue;
         }
@@ -132,5 +135,11 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 /** Detect if subject requires STEM chunker (DeepSeek) or humanities (Gemini Vision). */
 export function isStemSubject(subject: string): boolean {
   const s = subject.toLowerCase();
-  return ['матем', 'физик', 'хими', 'math', 'physic', 'chem'].some(k => s.includes(k));
+  // Russian: матем(атика), физик(а), хими(я), биолог(ия)
+  // Azerbaijani: riyaziyyat, fizika, kimya, biologiya
+  return [
+    'матем', 'физик', 'хими', 'биолог',
+    'math', 'physic', 'chem', 'bio',
+    'riyaz', 'fizika', 'kimya', 'biologiya',
+  ].some(k => s.includes(k));
 }

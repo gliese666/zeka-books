@@ -5,13 +5,23 @@
  * Emits structured events via a callback so the API route can stream them.
  */
 
-import { extractEpubImages, extractEpubText } from '@/lib/extract/epub';
-import { extractPdfText } from '@/lib/extract/pdf';
+import { extractEpubImages, extractEpubText, type PageImage } from '@/lib/extract/epub';
+import { extractPdfText, extractPdfImages } from '@/lib/extract/pdf';
 import { visionChunk } from '@/lib/ai/gemini';
 import { deepseekChunk, isStemSubject } from '@/lib/ai/deepseek';
 import { embedText } from '@/lib/ai/gemini';
 import { injectChunk, upsertChapterSession, getChapterSession } from '@/lib/supabase';
 import type { KarpathyChunk } from '@/lib/ai/deepseek';
+
+/** Max image pages per Gemini Vision call — keeps inline_data request under limits. */
+const VISION_BATCH = 8;
+
+/** Split an array into fixed-size windows. */
+function windows<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 
 // ── Event types ───────────────────────────────────────────────────────────────
 
@@ -45,6 +55,8 @@ export interface ChapterParams {
   fileBuffer: Buffer;
   fileType: 'epub' | 'pdf';
   isImageBased: boolean;
+  /** Optional link to a book_jobs row (worker mode). */
+  jobId?: string;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -63,7 +75,7 @@ export async function processChapter(
   }
 
   // Mark as processing
-  await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'processing');
+  await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'processing', { jobId: params.jobId });
 
   try {
     // ── 2. Extract ────────────────────────────────────────────────────────────
@@ -73,30 +85,41 @@ export async function processChapter(
     const useStem = isStemSubject(subject);
 
     if (params.isImageBased) {
-      // Image-based: extract images
-      const images = params.fileType === 'epub'
+      // Image-based: render/extract page images (PDF via pdf-to-img, EPUB via assets)
+      const images: PageImage[] = params.fileType === 'epub'
         ? await extractEpubImages(params.fileBuffer, params.pageStart, params.pageEnd)
-        : [];
+        : await extractPdfImages(params.fileBuffer, params.pageStart, params.pageEnd);
 
       if (!images.length) {
         throw new Error(`Не найдено изображений для стр. ${params.pageStart}–${params.pageEnd}`);
       }
 
-      emit({ type: 'extract_done', msg: `Найдено ${images.length} изображений (${Math.round(images.reduce((s, i) => s + i.data.length, 0) / 1024)}KB)` });
+      const totalKB = Math.round(images.reduce((s, i) => s + i.data.length, 0) / 1024);
+      const batches = windows(images, VISION_BATCH);
+      emit({ type: 'extract_done', msg: `Извлечено ${images.length} изображений (${totalKB}KB, ${batches.length} батч(ей) Vision)` });
 
-      // ── 3. Chunk (Vision) ──────────────────────────────────────────────────
-      emit({ type: 'chunk_start', msg: useStem ? 'DeepSeek V4 Pro (точные науки)...' : 'Gemini 3.5-Flash Vision OCR + Karpathy...' });
+      // ── 3. Chunk (Vision, sub-batched to respect Gemini inline limits) ──────
+      emit({ type: 'chunk_start', msg: useStem ? 'Vision OCR → DeepSeek V4 Pro (точные науки)...' : 'Gemini Vision OCR + Karpathy...' });
 
       if (useStem) {
-        // For STEM image-based: use Vision to get text first, then DeepSeek
-        const textFromVision = await extractTextViaVision(chapterTitle, images);
-        chunks = await deepseekChunk(chapterTitle, textFromVision, (msg) =>
+        // STEM image-based: OCR each batch to text, then one DeepSeek chunking pass
+        let ocrText = '';
+        for (let b = 0; b < batches.length; b++) {
+          emit({ type: 'retrying', msg: `Vision OCR батч ${b + 1}/${batches.length}...` });
+          ocrText += (await extractTextViaVision(chapterTitle, batches[b])) + '\n\n';
+        }
+        chunks = await deepseekChunk(chapterTitle, ocrText.trim(), (msg) =>
           emit({ type: 'retrying', msg })
         );
       } else {
-        chunks = await visionChunk(chapterTitle, images, (msg) =>
-          emit({ type: 'retrying', msg })
-        );
+        // Humanities image-based: Vision chunk each batch, merge results
+        for (let b = 0; b < batches.length; b++) {
+          if (batches.length > 1) emit({ type: 'retrying', msg: `Vision батч ${b + 1}/${batches.length}...` });
+          const part = await visionChunk(chapterTitle, batches[b], (msg) =>
+            emit({ type: 'retrying', msg })
+          );
+          chunks.push(...part);
+        }
       }
 
     } else {
@@ -151,14 +174,14 @@ export async function processChapter(
     emit({ type: 'embed_done', msg: `${injected} чанков записано в Supabase` });
 
     // ── 5. Mark done ───────────────────────────────────────────────────────────
-    await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'done', injected);
+    await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'done', { chunksCount: injected, jobId: params.jobId });
     emit({ type: 'chapter_done', msg: `✅ Глава ${chapterIndex} завершена: ${injected} чанков`, data: { chunks: injected } });
 
     return { chunks: injected, skipped: false };
 
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'error', 0, errMsg);
+    await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'error', { errorMessage: errMsg, jobId: params.jobId });
     emit({ type: 'error', msg: `❌ Ошибка: ${errMsg}` });
     throw err;
   }
@@ -179,8 +202,8 @@ async function extractTextViaVision(
   chapterTitle: string,
   images: import('@/lib/extract/epub').PageImage[]
 ): Promise<string> {
-  // Use Gemini Vision just for OCR (extract text only, no chunking)
   const GEMINI_KEY = process.env.GEMINI_API_KEY!;
+  const MODELS = ['gemini-3.5-flash', 'gemini-3.1-pro-preview'] as const;
   const parts = [
     { text: 'Прочитай текст со всех изображений и верни только plain text (без форматирования), сохраняя структуру страниц.\n\n' },
     ...images.map(img => ({
@@ -189,19 +212,33 @@ async function extractTextViaVision(
     { text: 'Верни только текст страниц.' },
   ];
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ role: 'user', parts }] }),
-      signal: AbortSignal.timeout(120_000),
-    }
-  );
+  for (let m = 0; m < MODELS.length; m++) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODELS[m]}:generateContent?key=${GEMINI_KEY}`;
+    const MAX_RETRIES = m === 0 ? 3 : 2;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ role: 'user', parts }] }),
+        signal: AbortSignal.timeout(120_000),
+      });
 
-  if (!res.ok) throw new Error(`Vision OCR failed: ${res.status}`);
-  const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      if (res.ok) {
+        const data = await res.json();
+        return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      }
+
+      const isRetryable = res.status === 429 || res.status >= 500;
+      if (isRetryable && attempt < MAX_RETRIES - 1) {
+        const wait = res.status === 429 ? 30_000 : 15_000 * (attempt + 1);
+        await sleep(wait);
+        continue;
+      }
+      break; // try next model
+    }
+  }
+
+  throw new Error(`Vision OCR failed after retries on all models`);
 }
 
 async function geminiTextChunk(

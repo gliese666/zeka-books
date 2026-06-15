@@ -3,27 +3,30 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --port 3005",
     "build": "next build",
-    "start": "next start",
-    "process": "node --require ./scripts/load-env.cjs ./node_modules/.bin/tsx scripts/process-local.ts"
+    "start": "next start --port 3005",
+    "worker": "node_modules/.bin/tsx --env-file=.env.local worker/index.ts",
+    "dev:all": "concurrently -n web,worker -c cyan,magenta \"next dev --port 3005\" \"npm run worker\""
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.107.0",
     "cheerio": "^1.2.0",
     "jszip": "^3.10.1",
     "next": "16.2.7",
-    "pdf-parse": "^2.4.5",
+    "pdf-to-img": "^6.1.0",
+    "pdfjs-dist": "^5.6.205",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/jszip": "^3.4.0",
     "@types/node": "^20",
-    "@types/pdf-parse": "^1.1.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^10.0.3",
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
     "typescript": "^5"
