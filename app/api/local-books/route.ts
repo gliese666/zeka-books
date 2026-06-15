@@ -111,3 +111,22 @@ export async function GET() {
 
   return NextResponse.json({ books });
 }
+
+/** DELETE /api/local-books?subject=X — удалить все чанки предмета из RAG */
+export async function DELETE(req: Request) {
+  const subject = new URL(req.url).searchParams.get('subject');
+  if (!subject) return NextResponse.json({ error: 'subject обязателен' }, { status: 400 });
+
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+
+  const { count, error } = await supabase
+    .from('dim_textbooks_vector')
+    .delete({ count: 'exact' })
+    .eq('subject', subject);
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ deleted: count ?? 0 });
+}

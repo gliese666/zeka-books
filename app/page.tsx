@@ -209,6 +209,14 @@ export default function Dashboard() {
     setChunks(null); setChunksId(null);
   },[]);
 
+  const deleteLegacy = useCallback(async (subject: string) => {
+    if (!confirm(`Удалить все чанки "${subject}" из RAG? Это нельзя отменить.`)) return;
+    setLocal(prev => prev.filter(b => b.subject !== subject));
+    if (legacyChunks?.subject === subject) setLegacyChunks(null);
+    await fetch(`/api/local-books?subject=${encodeURIComponent(subject)}`, { method: 'DELETE' });
+    fetch('/api/local-books').then(r=>r.json()).then(d=>setLocal(d.books??[]));
+  }, [legacyChunks]);
+
   // Load chunks for a legacy book (no job record) by subject
   const loadLegacyChunks = useCallback(async (subject: string) => {
     if (legacyChunks?.subject === subject) { setLegacyChunks(null); return; }
@@ -412,9 +420,7 @@ export default function Dashboard() {
                     {lb&&<button onClick={()=>enqueue(lb)} style={btn('#6366f1')}>
                       ↻ Переобработать
                     </button>}
-                    <span style={{fontSize:11,color:'#94a3b8'}}>
-                      Управление: загрузи книгу повторно или используй ↻ Переобработать
-                    </span>
+                    <button onClick={()=>deleteLegacy(subj)} style={btn('#dc2626')}>🗑 Удалить</button>
                   </div>
                   {showLC&&legacyChunks&&(
                     <div style={{borderTop:'1px solid #e2e8f0'}}>
