@@ -112,21 +112,37 @@ export async function GET() {
   return NextResponse.json({ books });
 }
 
-/** DELETE /api/local-books?subject=X — удалить все чанки предмета из RAG */
+/** DELETE /api/local-books?subject=X — удалить чанки из RAG + папку с диска */
 export async function DELETE(req: Request) {
   const subject = new URL(req.url).searchParams.get('subject');
   if (!subject) return NextResponse.json({ error: 'subject обязателен' }, { status: 400 });
 
+  // 1. Удалить чанки из Supabase
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
-
-  const { count, error } = await supabase
+  const { count } = await supabase
     .from('dim_textbooks_vector')
     .delete({ count: 'exact' })
     .eq('subject', subject);
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ deleted: count ?? 0 });
+  // 2. Удалить папку с диска (ищем по subject в имени папки)
+  let deletedFolder = false;
+  try {
+    const folders = fs.readdirSync(BOOKS_LABS).filter(f => {
+      const full = path.join(BOOKS_LABS, f);
+      return fs.statSync(full).isDirectory() && !f.startsWith('.');
+    });
+    for (const folder of folders) {
+      const folderSubject = folder.replace(/\s+(рус|aze|ru|az)$/i, '').trim();
+      if (folderSubject === subject) {
+        fs.rmSync(path.join(BOOKS_LABS, folder), { recursive: true, force: true });
+        deletedFolder = true;
+        break;
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  return NextResponse.json({ deleted_chunks: count ?? 0, deleted_folder: deletedFolder });
 }

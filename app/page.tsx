@@ -210,7 +210,7 @@ export default function Dashboard() {
   },[]);
 
   const deleteLegacy = useCallback(async (subject: string) => {
-    if (!confirm(`Удалить все чанки "${subject}" из RAG? Это нельзя отменить.`)) return;
+    if (!confirm(`Удалить "${subject}" полностью?\n\nБудут удалены:\n• Все чанки из RAG\n• Папка с файлом на диске\n\nЭто нельзя отменить.`)) return;
     setLocal(prev => prev.filter(b => b.subject !== subject));
     if (legacyChunks?.subject === subject) setLegacyChunks(null);
     await fetch(`/api/local-books?subject=${encodeURIComponent(subject)}`, { method: 'DELETE' });
@@ -420,7 +420,7 @@ export default function Dashboard() {
                     {lb&&<button onClick={()=>enqueue(lb)} style={btn('#6366f1')}>
                       ↻ Переобработать
                     </button>}
-                    <button onClick={()=>deleteLegacy(subj)} style={btn('#dc2626')}>🗑 Очистить RAG</button>
+                    <button onClick={()=>deleteLegacy(subj)} style={btn('#dc2626')}>🗑 Удалить</button>
                   </div>
                   {showLC&&legacyChunks&&(
                     <div style={{borderTop:'1px solid #e2e8f0'}}>
