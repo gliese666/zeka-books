@@ -57,6 +57,8 @@ export interface ChapterParams {
   isImageBased: boolean;
   /** Optional link to a book_jobs row (worker mode). */
   jobId?: string;
+  /** Called with final chunks just before marking chapter done (for .md export). */
+  onChunks?: (chunks: KarpathyChunk[], model: string) => Promise<void>;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -173,7 +175,17 @@ export async function processChapter(
 
     emit({ type: 'embed_done', msg: `${injected} чанков записано в Supabase` });
 
-    // ── 5. Mark done ───────────────────────────────────────────────────────────
+    // ── 5. Export .md (optional, non-fatal) ───────────────────────────────────
+    if (params.onChunks && chunks.length) {
+      const model = useStem ? 'deepseek-v4-pro' : 'gemini-3.5-flash';
+      try {
+        await params.onChunks(chunks, model);
+      } catch {
+        // md export failure must never abort chapter processing
+      }
+    }
+
+    // ── 6. Mark done ───────────────────────────────────────────────────────────
     await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'done', { chunksCount: injected, jobId: params.jobId });
     emit({ type: 'chapter_done', msg: `✅ Глава ${chapterIndex} завершена: ${injected} чанков`, data: { chunks: injected } });
 

@@ -14,6 +14,7 @@ import fs from 'fs';
 import { processChapter, type PipelineEvent } from '@/lib/pipeline';
 import { parseEpub } from '@/lib/extract/epub';
 import { parsePdf } from '@/lib/extract/pdf';
+import { writeChapterMd } from '@/lib/export-md';
 import {
   claimNextJob,
   getJob,
@@ -145,6 +146,16 @@ async function runJob(job: BookJob): Promise<void> {
             fileBuffer,
             fileType: job.file_type,
             isImageBased: job.is_image_based,
+            onChunks: async (chunks, model) => {
+              const mdPath = await writeChapterMd({
+                subject: job.subject,
+                chapterIndex: idx,
+                chapterTitle: ch.title,
+                chunks,
+                model,
+              });
+              log(`  📝 Экспорт MD: ${mdPath.split('/').slice(-2).join('/')}`);
+            },
           },
           (ev) => { void emit(ev); }
         );
