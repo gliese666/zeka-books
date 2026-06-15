@@ -21,6 +21,7 @@ export const CANONICAL_SUBJECTS: CanonicalSubject[] = [
   { subject: 'Coğrafiya 11',           lang: 'az', labelRu: 'География 11 (az)'      },
   { subject: 'История Азербайджана 9', lang: 'ru', labelRu: 'История Азербайджана 9' },
   { subject: 'География 9',            lang: 'ru', labelRu: 'География 9'            },
+  { subject: 'Azərbaycan dili 9',      lang: 'az', labelRu: 'Азербайджанский язык 9' },
   { subject: 'Fizika 9',               lang: 'az', labelRu: 'Физика 9'              },
   { subject: 'Kimya 9',                lang: 'az', labelRu: 'Химия 9'               },
   { subject: 'Biologiya 9',            lang: 'az', labelRu: 'Биология 9'            },
