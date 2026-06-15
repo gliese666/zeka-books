@@ -111,16 +111,31 @@ export async function extractPdfImages(
   const { pdf } = await import('pdf-to-img');
   const sharp = (await import('sharp')).default;
 
+  // Gemini inline_data limit: stay well under 4MB per page
+  const MAX_PAGE_BYTES = 4 * 1024 * 1024;
+
   const doc = await pdf(buffer, { scale });
   const last = Math.min(pageEnd, doc.length);
   const images: PageImage[] = [];
 
   for (let n = pageStart; n <= last; n++) {
     const png = await doc.getPage(n); // pdf-to-img returns PNG buffers
-    const jpg = await sharp(png)
+
+    // Start at requested quality, reduce until page fits within limit
+    let q = quality;
+    let jpg = await sharp(png)
       .resize({ width: maxWidth, withoutEnlargement: true })
-      .jpeg({ quality })
+      .jpeg({ quality: q })
       .toBuffer();
+
+    while (jpg.length > MAX_PAGE_BYTES && q > 40) {
+      q -= 10;
+      jpg = await sharp(png)
+        .resize({ width: maxWidth, withoutEnlargement: true })
+        .jpeg({ quality: q })
+        .toBuffer();
+    }
+
     images.push({ pageNum: n, mimeType: 'image/jpeg', data: jpg });
   }
 
