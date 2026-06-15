@@ -11,7 +11,7 @@ import path from 'path';
 import { parsePdf } from '@/lib/extract/pdf';
 import { parseEpub } from '@/lib/extract/epub';
 import { createJob } from '@/lib/supabase';
-import { normalizeSubject, subjectLang } from '@/lib/normalize';
+import { normalizeSubject, subjectLang, folderName } from '@/lib/normalize';
 
 export const dynamic = 'force-dynamic';
 
@@ -56,8 +56,8 @@ export async function POST(req: NextRequest) {
 
     const canonicalSubject = normalizeSubject(subjectHint || title);
 
-    // Save file to Books Labs/<subject>/00_Raw/
-    const dir = path.join(BOOKS_DIR, canonicalSubject, '00_Raw');
+    // Save file to Books Labs/<subject> <aze|рус>/00_Raw/
+    const dir = path.join(BOOKS_DIR, folderName(canonicalSubject), '00_Raw');
     if (!existsSync(BOOKS_DIR)) {
       return NextResponse.json({ error: `Books Labs папка не найдена: ${BOOKS_DIR}` }, { status: 500 });
     }

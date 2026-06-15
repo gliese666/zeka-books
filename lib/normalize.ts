@@ -47,3 +47,13 @@ export function normalizeSubject(raw: string): string {
 export function subjectLang(subject: string): Lang {
   return CANONICAL_SUBJECTS.find((s) => s.subject === subject)?.lang ?? 'ru';
 }
+
+/**
+ * Имя папки в Books Labs: "{canonical subject} {aze|рус}"
+ * Пример: "Математика 9" → "Математика 9 рус", "Coğrafiya 11" → "Coğrafiya 11 aze"
+ */
+export function folderName(subject: string): string {
+  const lang = subjectLang(subject);
+  const suffix = lang === 'az' ? 'aze' : 'рус';
+  return `${subject} ${suffix}`;
+}
