@@ -208,13 +208,13 @@ export async function bumpChapterAttempts(bookName: string, chapterIndex: number
   return attempts;
 }
 
-export async function getBookSessions(bookName: string): Promise<ChapterSession[]> {
-  const { data, error } = await getSupabase()
+export async function getBookSessions(bookName: string, jobId?: string): Promise<ChapterSession[]> {
+  let q = getSupabase()
     .from('book_processing_sessions')
     .select('*')
-    .eq('book_name', bookName)
-    .order('chapter_index');
-
+    .eq('book_name', bookName);
+  if (jobId) q = q.eq('job_id', jobId);
+  const { data, error } = await q.order('chapter_index');
   if (error) return [];
   return (data ?? []) as ChapterSession[];
 }
@@ -293,6 +293,8 @@ export async function deleteJob(id: string): Promise<void> {
 export interface JobWithProgress extends BookJob {
   done_chapters: number;
   total_chunks: number;
+  current_chapter: string | null;
+  error_chapters: number;
 }
 
 export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
@@ -305,21 +307,42 @@ export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
   const jobs = (data ?? []) as BookJob[];
   if (!jobs.length) return [];
 
-  // Enrich with per-job progress from chapter checkpoints (one query).
+  const bookNames = jobs.map((j) => j.book_name);
+
+  // Enrich with per-job progress from chapter checkpoints.
+  // Group by book_name (not job_id) so chapters processed in a previous run
+  // (with a different job_id) are still counted correctly.
   const { data: sess } = await getSupabase()
     .from('book_processing_sessions')
-    .select('job_id, status, chunks_count')
-    .in('job_id', jobs.map((j) => j.id));
+    .select('book_name, job_id, status, chunks_count, chapter_title')
+    .in('book_name', bookNames);
 
+  // done/chunks by book_name — count across all runs for accurate resume progress
   const done: Record<string, number> = {};
   const chunks: Record<string, number> = {};
+  // errors/current by job_id — only current job, never bleed from old runs
+  const current: Record<string, string> = {};
+  const errors: Record<string, number> = {};
   for (const s of sess ?? []) {
+    if (!s.book_name) continue;
+    if (s.status === 'done') done[s.book_name] = (done[s.book_name] ?? 0) + 1;
+    chunks[s.book_name] = (chunks[s.book_name] ?? 0) + (s.chunks_count ?? 0);
     if (!s.job_id) continue;
-    if (s.status === 'done') done[s.job_id] = (done[s.job_id] ?? 0) + 1;
-    chunks[s.job_id] = (chunks[s.job_id] ?? 0) + (s.chunks_count ?? 0);
+    if (s.status === 'error') errors[s.job_id] = (errors[s.job_id] ?? 0) + 1;
+    if (s.status === 'processing' && s.chapter_title) current[s.job_id] = s.chapter_title;
   }
 
-  return jobs.map((j) => ({ ...j, done_chapters: done[j.id] ?? 0, total_chunks: chunks[j.id] ?? 0 }));
+  return jobs.map((j) => ({
+    ...j,
+    done_chapters: done[j.book_name] ?? 0,
+    total_chunks: chunks[j.book_name] ?? 0,
+    current_chapter: current[j.id] ?? null,
+    error_chapters: errors[j.id] ?? 0,
+  }));
+}
+
+export async function deleteEventsByJobId(jobId: string): Promise<void> {
+  await getSupabase().from('book_processing_events').delete().eq('job_id', jobId);
 }
 
 export async function getJob(id: string): Promise<BookJob | null> {
@@ -336,7 +359,7 @@ export async function claimNextJob(): Promise<BookJob | null> {
   const { data } = await getSupabase()
     .from('book_jobs')
     .select('*')
-    .in('status', ['pending_parse', 'queued', 'running'])
+    .in('status', ['queued', 'running'])
     .order('created_at', { ascending: true })
     .limit(1);
   const job = data?.[0] as BookJob | undefined;
