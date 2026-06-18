@@ -356,7 +356,7 @@ export async function claimNextJob(): Promise<BookJob | null> {
   const { data } = await getSupabase()
     .from('book_jobs')
     .select('*')
-    .in('status', ['pending_parse', 'queued', 'running'])
+    .in('status', ['queued', 'running'])
     .order('created_at', { ascending: true })
     .limit(1);
   const job = data?.[0] as BookJob | undefined;

@@ -157,9 +157,7 @@ export default function Dashboard() {
       const res = await fetch('/api/upload-pdf',{method:'POST',body:fd});
       const data = await res.json();
       if (!res.ok){ setUploadMsg({ok:false,text:data.error??'Ошибка'}); return; }
-      // Auto-start: move from pending_parse → queued so worker picks it up
-      try { await fetch(`/api/jobs/${data.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})}); } catch {}
-      setUploadMsg({ok:true,text:`✅ "${data.subject}" — поставлен в очередь`});
+      setUploadMsg({ok:true,text:`✅ "${data.subject}" — загружен. Нажми ▶ Запустить чтобы начать обработку.`});
       setExpanded(data.id); setEvents([]); cursor.current=0; setHint('');
       fetch('/api/local-books').then(r=>r.json()).then(d=>setLocal(d.books??[]));
     } catch(e){ setUploadMsg({ok:false,text:String(e)}); }
