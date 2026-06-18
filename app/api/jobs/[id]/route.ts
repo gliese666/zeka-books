@@ -29,7 +29,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
   const { id } = await ctx.params;
   const job = await getJob(id);
   if (!job) return NextResponse.json({ error: 'Job не найден' }, { status: 404 });
-  const chapters = await getBookSessions(job.book_name);
+  const chapters = await getBookSessions(job.book_name, id);
   return NextResponse.json({ job, chapters });
 }
 

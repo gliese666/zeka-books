@@ -208,13 +208,13 @@ export async function bumpChapterAttempts(bookName: string, chapterIndex: number
   return attempts;
 }
 
-export async function getBookSessions(bookName: string): Promise<ChapterSession[]> {
-  const { data, error } = await getSupabase()
+export async function getBookSessions(bookName: string, jobId?: string): Promise<ChapterSession[]> {
+  let q = getSupabase()
     .from('book_processing_sessions')
     .select('*')
-    .eq('book_name', bookName)
-    .order('chapter_index');
-
+    .eq('book_name', bookName);
+  if (jobId) q = q.eq('job_id', jobId);
+  const { data, error } = await q.order('chapter_index');
   if (error) return [];
   return (data ?? []) as ChapterSession[];
 }
