@@ -81,8 +81,9 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     case 'retry':
     case 'retry-failed':
       // Только главы с ошибками → pending. Готовые главы и их чанки без изменений.
+      // Status → paused so worker doesn't auto-pick up; user clicks ▶ Запустить manually.
       await resetFailedChapters(job.book_name);
-      await updateJobStatus(id, 'queued', null);
+      await updateJobStatus(id, 'paused', null);
       break;
 
     case 'rerun':
