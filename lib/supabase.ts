@@ -314,27 +314,30 @@ export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
   // (with a different job_id) are still counted correctly.
   const { data: sess } = await getSupabase()
     .from('book_processing_sessions')
-    .select('book_name, status, chunks_count, chapter_title')
+    .select('book_name, job_id, status, chunks_count, chapter_title')
     .in('book_name', bookNames);
 
+  // done/chunks by book_name — count across all runs for accurate resume progress
   const done: Record<string, number> = {};
   const chunks: Record<string, number> = {};
+  // errors/current by job_id — only current job, never bleed from old runs
   const current: Record<string, string> = {};
   const errors: Record<string, number> = {};
   for (const s of sess ?? []) {
     if (!s.book_name) continue;
     if (s.status === 'done') done[s.book_name] = (done[s.book_name] ?? 0) + 1;
-    if (s.status === 'error') errors[s.book_name] = (errors[s.book_name] ?? 0) + 1;
-    if (s.status === 'processing' && s.chapter_title) current[s.book_name] = s.chapter_title;
     chunks[s.book_name] = (chunks[s.book_name] ?? 0) + (s.chunks_count ?? 0);
+    if (!s.job_id) continue;
+    if (s.status === 'error') errors[s.job_id] = (errors[s.job_id] ?? 0) + 1;
+    if (s.status === 'processing' && s.chapter_title) current[s.job_id] = s.chapter_title;
   }
 
   return jobs.map((j) => ({
     ...j,
     done_chapters: done[j.book_name] ?? 0,
     total_chunks: chunks[j.book_name] ?? 0,
-    current_chapter: current[j.book_name] ?? null,
-    error_chapters: errors[j.book_name] ?? 0,
+    current_chapter: current[j.id] ?? null,
+    error_chapters: errors[j.id] ?? 0,
   }));
 }
 
