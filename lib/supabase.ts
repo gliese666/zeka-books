@@ -293,6 +293,8 @@ export async function deleteJob(id: string): Promise<void> {
 export interface JobWithProgress extends BookJob {
   done_chapters: number;
   total_chunks: number;
+  current_chapter: string | null;
+  error_chapters: number;
 }
 
 export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
@@ -305,19 +307,25 @@ export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
   const jobs = (data ?? []) as BookJob[];
   if (!jobs.length) return [];
 
+  const bookNames = jobs.map((j) => j.book_name);
+
   // Enrich with per-job progress from chapter checkpoints.
   // Group by book_name (not job_id) so chapters processed in a previous run
   // (with a different job_id) are still counted correctly.
   const { data: sess } = await getSupabase()
     .from('book_processing_sessions')
-    .select('book_name, status, chunks_count')
-    .in('book_name', jobs.map((j) => j.book_name));
+    .select('book_name, status, chunks_count, chapter_title')
+    .in('book_name', bookNames);
 
   const done: Record<string, number> = {};
   const chunks: Record<string, number> = {};
+  const current: Record<string, string> = {};
+  const errors: Record<string, number> = {};
   for (const s of sess ?? []) {
     if (!s.book_name) continue;
     if (s.status === 'done') done[s.book_name] = (done[s.book_name] ?? 0) + 1;
+    if (s.status === 'error') errors[s.book_name] = (errors[s.book_name] ?? 0) + 1;
+    if (s.status === 'processing' && s.chapter_title) current[s.book_name] = s.chapter_title;
     chunks[s.book_name] = (chunks[s.book_name] ?? 0) + (s.chunks_count ?? 0);
   }
 
@@ -325,7 +333,13 @@ export async function listJobs(limit = 50): Promise<JobWithProgress[]> {
     ...j,
     done_chapters: done[j.book_name] ?? 0,
     total_chunks: chunks[j.book_name] ?? 0,
+    current_chapter: current[j.book_name] ?? null,
+    error_chapters: errors[j.book_name] ?? 0,
   }));
+}
+
+export async function deleteEventsByJobId(jobId: string): Promise<void> {
+  await getSupabase().from('book_processing_events').delete().eq('job_id', jobId);
 }
 
 export async function getJob(id: string): Promise<BookJob | null> {

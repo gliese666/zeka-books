@@ -13,10 +13,15 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import fs from 'fs';
+import path from 'path';
+import { folderName } from '@/lib/normalize';
 import {
   getJob, getBookSessions, updateJobStatus,
-  resetFailedChapters, resetAllChapters, deleteChunksBySubject, deleteJob,
+  resetFailedChapters, resetAllChapters, deleteChunksBySubject, deleteEventsByJobId, deleteJob,
 } from '@/lib/supabase';
+
+const BOOKS_LABS = '/Users/akram/Library/Mobile Documents/iCloud~md~obsidian/Documents/My Obsidian/Books Labs';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,7 +33,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
   return NextResponse.json({ job, chapters });
 }
 
-/** DELETE /api/jobs/[id] — удалить задание (только если не running). */
+/** DELETE /api/jobs/[id] — полное удаление: чанки из RAG + сессии + события + папка на диске + запись. */
 export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   const job = await getJob(id);
@@ -36,8 +41,24 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: str
   if (job.status === 'running') {
     return NextResponse.json({ error: 'Нельзя удалить задание в процессе обработки' }, { status: 409 });
   }
+
+  // 1. Удалить чанки из RAG
+  const deletedChunks = await deleteChunksBySubject(job.subject);
+  // 2. Удалить чекпойнты глав
+  await resetAllChapters(job.book_name);
+  // 3. Удалить события live-лога
+  await deleteEventsByJobId(id);
+  // 4. Удалить папку с диска (Books Labs)
+  const folder = path.join(BOOKS_LABS, folderName(job.subject));
+  let deletedFolder = false;
+  if (fs.existsSync(folder)) {
+    fs.rmSync(folder, { recursive: true, force: true });
+    deletedFolder = true;
+  }
+  // 5. Удалить запись job
   await deleteJob(id);
-  return NextResponse.json({ ok: true });
+
+  return NextResponse.json({ ok: true, deleted_chunks: deletedChunks, deleted_folder: deletedFolder });
 }
 
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {

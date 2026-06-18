@@ -14,6 +14,7 @@ interface Job {
   status: string; file_type: 'epub' | 'pdf'; is_image_based: boolean;
   total_chapters: number; total_pages: number;
   done_chapters: number; total_chunks: number;
+  current_chapter: string | null; error_chapters: number;
   error_message: string | null; updated_at: string; created_at: string;
 }
 interface Chapter {
@@ -74,6 +75,8 @@ export default function Dashboard() {
   const [uploadMsg, setUploadMsg] = useState<{ok:boolean;text:string}|null>(null);
   const [hint, setHint]           = useState('');
   const [confirmHard, setConfirmHard] = useState<string|null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<Job|null>(null);
+  const [enqueuingId, setEnqueuingId] = useState<string|null>(null);
   const [legacyChunks, setLegacyChunks] = useState<{subject:string;chunks:Chunk[]}|null>(null);
   const cursor = useRef(0);
   const logRef = useRef<HTMLDivElement>(null);
@@ -169,13 +172,18 @@ export default function Dashboard() {
   },[uploadFile]);
 
   const enqueue = useCallback(async (b:LocalBook)=>{
-    const res = await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filePath:b.filePath,subject:b.subject})});
-    const j = await res.json();
-    if (res.ok&&j?.id){
-      // Auto-start: move from pending_parse → queued so worker picks it up
-      try { await fetch(`/api/jobs/${j.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})}); } catch {}
-      setExpanded(j.id); setEvents([]); cursor.current=0;
+    setEnqueuingId(b.subject);
+    try {
+      const res = await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({filePath:b.filePath,subject:b.subject})});
+      const j = await res.json();
+      if (res.ok&&j?.id){
+        // Auto-start: move from pending_parse → queued so worker picks it up
+        try { await fetch(`/api/jobs/${j.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})}); } catch {}
+        setExpanded(j.id); setEvents([]); cursor.current=0;
+      }
+    } finally {
+      setEnqueuingId(null);
     }
   },[]);
 
@@ -191,15 +199,20 @@ export default function Dashboard() {
     setEvents([]); cursor.current=0;
   },[]);
 
-  const deleteJob = useCallback(async (id: string) => {
-    deletedIds.current.add(id);
-    setJobs(prev => prev.filter(j => j.id !== id));
-    if (expanded === id) { setExpanded(null); setEvents([]); cursor.current = 0; }
+  const deleteJob = useCallback((id: string) => {
+    const job = jobs.find(j => j.id === id);
+    if (job) setConfirmDelete(job);
+  }, [jobs]);
+
+  const confirmDeleteJob = useCallback(async (job: Job) => {
+    setConfirmDelete(null);
+    deletedIds.current.add(job.id);
+    setJobs(prev => prev.filter(j => j.id !== job.id));
+    if (expanded === job.id) { setExpanded(null); setEvents([]); cursor.current = 0; }
     try {
-      await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
+      await fetch(`/api/jobs/${job.id}`, { method: 'DELETE' });
     } catch {
-      // If delete failed, remove from deletedIds so it reappears on next poll
-      deletedIds.current.delete(id);
+      deletedIds.current.delete(job.id);
     }
     fetch('/api/local-books').then(r=>r.json()).then(d=>setLocal(d.books??[]));
   }, [expanded]);
@@ -270,6 +283,37 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Delete confirmation modal */}
+      {confirmDelete && (
+        <div style={{
+          position:'fixed',inset:0,zIndex:999,background:'rgba(0,0,0,0.5)',
+          display:'flex',alignItems:'center',justifyContent:'center',
+        }}>
+          <div style={{background:'#fff',borderRadius:16,padding:28,maxWidth:440,width:'90%',boxShadow:'0 20px 60px rgba(0,0,0,0.3)'}}>
+            <div style={{fontSize:28,marginBottom:12}}>🗑</div>
+            <div style={{fontSize:16,fontWeight:700,color:'#0f172a',marginBottom:8}}>Удалить книгу полностью?</div>
+            <div style={{fontSize:14,color:'#475569',marginBottom:6,fontWeight:600}}>{confirmDelete.subject}</div>
+            <div style={{fontSize:13,color:'#64748b',marginBottom:20,lineHeight:1.7}}>
+              Будут безвозвратно удалены:<br/>
+              • <b>{confirmDelete.total_chunks} чанков</b> из RAG базы<br/>
+              • Папка с файлом на диске<br/>
+              • История обработки и логи<br/>
+              • Запись в очереди
+            </div>
+            <div style={{display:'flex',gap:10}}>
+              <button onClick={()=>confirmDeleteJob(confirmDelete)} style={{
+                flex:1,height:40,borderRadius:10,fontSize:14,fontWeight:700,
+                background:'#dc2626',color:'#fff',border:'none',cursor:'pointer',
+              }}>🗑 Удалить всё</button>
+              <button onClick={()=>setConfirmDelete(null)} style={{
+                flex:1,height:40,borderRadius:10,fontSize:14,fontWeight:600,
+                background:'#f1f5f9',color:'#475569',border:'1px solid #e2e8f0',cursor:'pointer',
+              }}>Отмена</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Navbar */}
       <nav style={{
         background:'#0f172a',height:52,display:'flex',alignItems:'center',padding:'0 24px',
@@ -278,12 +322,18 @@ export default function Dashboard() {
         <div style={{maxWidth:1140,margin:'0 auto',width:'100%',display:'flex',alignItems:'center',gap:16}}>
           <span style={{fontFamily:'var(--font-display)',fontWeight:700,fontSize:17,color:'#f8fafc'}}>📚 Zeka Books</span>
           <a href="/" style={{fontSize:13,color:'#e2e8f0',fontWeight:600,textDecoration:'none'}}>🏠 Дашборд</a>
-          <a href="/errors" style={{
-            fontSize:13,fontWeight:600,textDecoration:'none',
-            color:stats?.errors&&stats.errors>0?'#fca5a5':'#94a3b8',
-          }}>
-            🐛 Ошибки{stats?.errors&&stats.errors>0?` (${stats.errors})`:''}
-          </a>
+          {(() => {
+            const totalErrChapters = jobs.reduce((sum, j) => sum + (j.error_chapters ?? 0), 0);
+            const hasErr = totalErrChapters > 0;
+            return (
+              <a href="/errors" style={{
+                fontSize:13,fontWeight:600,textDecoration:'none',
+                color:hasErr?'#fca5a5':'#94a3b8',
+              }}>
+                🐛 Ошибки{hasErr?` (${totalErrChapters})`:''}
+              </a>
+            );
+          })()}
           <span style={{flex:1}}/>
           <span style={{display:'flex',alignItems:'center',gap:6}}>
             <span style={{
@@ -369,9 +419,11 @@ export default function Dashboard() {
                     <span style={{fontSize:14,fontWeight:600,color:'#0f172a'}}>{b.subject}</span>
                   </div>
                   <div style={{fontSize:12,color:'#64748b',marginBottom:12}}>{b.fileType.toUpperCase()} · {b.sizeMb}MB</div>
-                  <button onClick={()=>enqueue(b)} style={{width:'100%',height:32,borderRadius:8,
-                    fontSize:13,fontWeight:600,background:'#6366f1',color:'#fff',border:'none',cursor:'pointer'}}>
-                    ▶ Обработать
+                  <button onClick={()=>enqueue(b)} disabled={enqueuingId===b.subject}
+                    style={{width:'100%',height:32,borderRadius:8,fontSize:13,fontWeight:600,
+                      background:enqueuingId===b.subject?'#a5b4fc':'#6366f1',color:'#fff',
+                      border:'none',cursor:enqueuingId===b.subject?'wait':'pointer'}}>
+                    {enqueuingId===b.subject ? '⏳ Добавление...' : '▶ Обработать'}
                   </button>
                 </div>
               ))}
@@ -547,11 +599,22 @@ function JobList({jobs,expanded,expJob,chapters,events,curStep,isRunning,
               <span style={{width:11,height:11,borderRadius:'50%',background:col,display:'inline-block',flexShrink:0,
                 boxShadow:job.status==='running'?`0 0 0 4px ${col}30`:'none'}}/>
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:700,fontSize:15,color:'#0f172a',marginBottom:2}}>{job.subject}</div>
+                <div style={{fontWeight:700,fontSize:15,color:'#0f172a',marginBottom:2}}>
+                  {job.subject}
+                  {job.error_chapters>0&&<span style={{marginLeft:8,fontSize:11,color:'#ef4444',background:'#fef2f2',padding:'2px 7px',borderRadius:99,fontWeight:600}}>⚠️ {job.error_chapters} ошибок</span>}
+                </div>
                 <div style={{fontSize:12,color:'#64748b'}}>
                   {job.file_type.toUpperCase()}{job.is_image_based?' · скан':' · текст'} · {job.total_pages} стр.
                   {isArchive&&<span style={{marginLeft:8,color:'#8b5cf6'}}>· архив от {fmtD(job.updated_at)}</span>}
                 </div>
+                {job.status==='running'&&job.current_chapter&&(
+                  <div style={{fontSize:11,color:'#3b82f6',marginTop:3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    ⚙️ {job.current_chapter}
+                  </div>
+                )}
+                {job.status==='running'&&!job.current_chapter&&(
+                  <div style={{fontSize:11,color:'#94a3b8',marginTop:3}}>⚙️ Анализирую структуру...</div>
+                )}
               </div>
               <div style={{textAlign:'right',flexShrink:0,marginRight:12}}>
                 <div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{doneChapters}/{job.total_chapters} глав</div>
@@ -599,6 +662,13 @@ function JobList({jobs,expanded,expJob,chapters,events,curStep,isRunning,
                     {showChunks?'✕ Чанки':'🔍 Чанки'}
                   </button>}
                   {job.error_message&&<span style={{fontSize:11,color:'#ef4444'}}>⚠ {job.error_message.slice(0,70)}</span>}
+                  {job.status==='error'&&job.done_chapters>0&&(
+                    <div style={{width:'100%',marginTop:6,padding:'8px 12px',borderRadius:8,
+                      background:'#f0fdf4',borderLeft:'3px solid #22c55e',fontSize:12,color:'#15803d',lineHeight:1.6}}>
+                      ✅ {job.done_chapters} из {job.total_chapters} глав сохранено — данные не потеряны.<br/>
+                      Нажми «↻ Повторить ошибки» — обработка продолжится с места остановки.
+                    </div>
+                  )}
                 </>
               )}
             </div>
