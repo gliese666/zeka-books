@@ -245,7 +245,7 @@ export default function Dashboard() {
   const ragList   = Object.entries(stats?.bySubject??{}).sort((a,b)=>b[1]-a[1]);
   const activeJobs   = jobs.filter(j=>j.status!=='archived');
   const archivedJobs = jobs.filter(j=>j.status==='archived');
-  const unprocessed  = local.filter(b=>b.ragReadyCount===0);
+  const unprocessed  = local.filter(b=>b.ragReadyCount===0 && !jobs.some(j=>j.subject===b.subject));
   // Legacy: subjects in RAG that have no job record at all
   const legacySubjects = ragList.filter(([subj]) => !jobs.some(j=>j.subject===subj));
 
