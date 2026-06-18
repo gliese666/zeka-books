@@ -420,11 +420,11 @@ export async function resetStuckChapters(bookName: string): Promise<void> {
     .eq('status', 'processing');
 }
 
-/** Retry-failed: flip only 'error' chapters back to 'pending'. */
+/** Retry-failed: flip only 'error' chapters back to 'pending' and reset attempt counter. */
 export async function resetFailedChapters(bookName: string): Promise<void> {
   await getSupabase()
     .from('book_processing_sessions')
-    .update({ status: 'pending', error_message: null })
+    .update({ status: 'pending', error_message: null, attempts: 0 })
     .eq('book_name', bookName)
     .eq('status', 'error');
 }
