@@ -276,7 +276,6 @@ export async function updateJobAfterParse(
       total_chapters: meta.chapters.length,
       is_image_based: meta.is_image_based,
       total_pages: meta.total_pages,
-      status: 'queued',
     })
     .eq('id', id);
   if (error) throw new Error(`updateJobAfterParse error: ${error.message}`);
