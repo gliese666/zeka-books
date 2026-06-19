@@ -41,7 +41,9 @@ export function isCanonicalSubject(s: string): boolean {
  * Класс не «изобретается» — если в исходнике нет номера, он не добавляется.
  */
 export function normalizeSubject(raw: string): string {
-  return raw.trim().replace(/\s+(рус|aze|ru|az)$/i, '').trim();
+  // NFC: macOS HFS+ gives NFD filenames (й = и + combining breve).
+  // Normalize once here so DB storage and queries always use NFC.
+  return raw.normalize('NFC').trim().replace(/\s+(рус|aze|ru|az)$/i, '').trim();
 }
 
 /** Язык канонического предмета (для metadata.lang). Дефолт 'ru', если не найден. */

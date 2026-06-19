@@ -107,9 +107,13 @@ async function runJob(job: BookJob): Promise<void> {
       return; // job stays 'running' → re-claimed and resumed next boot
     }
 
-    // Respect external pause (API set status='paused').
+    // Respect external pause or deletion (API set status='paused' or DELETE job).
     const fresh = await getJob(job.id);
-    if (fresh?.status === 'paused') {
+    if (!fresh) {
+      log('🗑 Job удалён во время обработки — прекращаем, чанки не добавляем.');
+      return;
+    }
+    if (fresh.status === 'paused') {
       log('⏸ Job на паузе — прекращаем обработку.');
       await appendEvent(job.id, { level: 'warn', type: 'job_paused', msg: '⏸ Пауза' });
       return;
