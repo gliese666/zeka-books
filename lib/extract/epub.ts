@@ -258,7 +258,7 @@ async function buildChapters(
   const links: Array<{ text: string; page: number }> = [];
 
   // EPUB3 nav
-  $('nav[*|type="toc"] a, nav a').each((_, el) => {
+  $('nav a').each((_, el) => {
     const href = ($(el).attr('href') ?? '').split('#')[0];
     const text = $(el).text().trim();
     const fname = href.split('/').pop()!;
