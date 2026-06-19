@@ -161,12 +161,9 @@ export async function processChapter(
 
       emit({ type: 'embed_progress', msg: `Эмбеддинг ${i + 1}/${chunks.length}: "${chunk.title.slice(0, 40)}"`, data: { current: i + 1, total: chunks.length } });
 
-      const [vec768, vec3072] = await Promise.all([
-        embedText(embedText_str, 768),
-        embedText(embedText_str, 3072),
-      ]);
+      const vec1024 = await embedText(embedText_str, 1024);
 
-      await injectChunk(subject, chapterTitle, chunk, vec768, vec3072);
+      await injectChunk(subject, chapterTitle, chunk, vec1024);
       injected++;
 
       // Small pause to respect rate limits

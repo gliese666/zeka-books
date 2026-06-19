@@ -104,8 +104,7 @@ export async function injectChunk(
   subject: string,
   topic: string,
   chunk: KarpathyChunk,
-  vec768: number[],
-  vec3072: number[]
+  vec1024: number[]
 ): Promise<void> {
   const meta = {
     type: 'wiki',
@@ -133,8 +132,7 @@ export async function injectChunk(
         topic,
         content: chunk.content,
         content_hash: contentHash(subject, topic, chunk.content),
-        embedding_768: vec768,
-        embedding_3072: vec3072,
+        embedding_1024: vec1024,
         metadata: meta,
       },
       { onConflict: 'subject,content_hash', ignoreDuplicates: true }
