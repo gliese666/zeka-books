@@ -275,13 +275,37 @@ async function buildChapters(
         return !t.includes('page-list') && !t.includes('landmarks');
       }).first();
 
-  targetNav.find('a').each((_, el) => {
-    const href = ($(el).attr('href') ?? '').split('#')[0];
-    const text = $(el).text().trim();
-    const fname = href.split('/').pop()!;
-    const page = hrefToPage.get(fname) ?? hrefToPage.get(href);
-    if (page && text.length > 1) links.push({ text, page });
-  });
+  // Walk nav <ol> manually — max 2 levels deep.
+  // Level 1 = разделы, Level 2 = параграфы, Level 3+ = упражнения (skip).
+  // This prevents 100-200 entry navs (every exercise listed) from exploding chapter count.
+  function walkOl(olEl: cheerio.Element, depth: number) {
+    if (depth > 2) return;
+    $(olEl).children('li').each((_, li) => {
+      const a = $(li).children('a').first();
+      if (a.length) {
+        const href = (a.attr('href') ?? '').split('#')[0];
+        const text = a.text().trim();
+        const fname = href.split('/').pop()!;
+        const page = hrefToPage.get(fname) ?? hrefToPage.get(href);
+        if (page && text.length > 1) links.push({ text, page });
+      }
+      $(li).children('ol').each((_, nestedOl) => walkOl(nestedOl, depth + 1));
+    });
+  }
+
+  const rootOl = targetNav.children('ol').first().get(0);
+  if (rootOl) {
+    walkOl(rootOl, 1);
+  } else {
+    // Flat fallback: nav has no <ol> wrapper
+    targetNav.find('a').each((_, el) => {
+      const href = ($(el).attr('href') ?? '').split('#')[0];
+      const text = $(el).text().trim();
+      const fname = href.split('/').pop()!;
+      const page = hrefToPage.get(fname) ?? hrefToPage.get(href);
+      if (page && text.length > 1) links.push({ text, page });
+    });
+  }
 
   // EPUB2 NCX fallback
   if (!links.length) {

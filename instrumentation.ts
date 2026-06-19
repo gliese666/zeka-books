@@ -24,7 +24,7 @@ export async function register() {
   function startWorker() {
     if (restarting) return;
 
-    const child = spawn(tsx, ['--env-file=.env.local', workerScript], {
+    const child = spawn(tsx, ['--no-cache', '--env-file=.env.local', workerScript], {
       cwd: root,
       stdio: 'inherit',
       env: { ...process.env },
