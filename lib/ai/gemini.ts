@@ -144,7 +144,7 @@ async function callVisionApi(
 
 // ── Embedding ─────────────────────────────────────────────────────────────────
 
-export async function embedText(text: string, dims: 768 | 3072): Promise<number[]> {
+export async function embedText(text: string, dims: 768 | 1024 | 3072): Promise<number[]> {
   const body = {
     outputDimensionality: dims,
     content: { parts: [{ text: text.slice(0, 8000) }] },

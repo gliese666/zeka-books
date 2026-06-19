@@ -9,7 +9,7 @@ import { extractEpubImages, extractEpubText, type PageImage } from '@/lib/extrac
 import { extractPdfText, extractPdfImages } from '@/lib/extract/pdf';
 import { visionChunk } from '@/lib/ai/gemini';
 import { deepseekChunk, isStemSubject } from '@/lib/ai/deepseek';
-import { embedTextOpenAI } from '@/lib/ai/openai';
+import { embedText } from '@/lib/ai/gemini';
 import { injectChunk, upsertChapterSession, getChapterSession } from '@/lib/supabase';
 import type { KarpathyChunk } from '@/lib/ai/deepseek';
 
@@ -161,7 +161,7 @@ export async function processChapter(
 
       emit({ type: 'embed_progress', msg: `Эмбеддинг ${i + 1}/${chunks.length}: "${chunk.title.slice(0, 40)}"`, data: { current: i + 1, total: chunks.length } });
 
-      const vec1024 = await embedTextOpenAI(embedText_str, 1024);
+      const vec1024 = await embedText(embedText_str, 1024);
 
       await injectChunk(subject, chapterTitle, chunk, vec1024);
       injected++;
