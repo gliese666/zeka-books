@@ -33,6 +33,7 @@ interface ManifestItem {
   href: string;
   mediaType: string;
   absPath: string; // resolved path inside zip
+  properties?: string;
 }
 
 interface EpubStructure {
@@ -79,9 +80,10 @@ async function parseOpf(zip: JSZip): Promise<EpubStructure> {
     const id = $(el).attr('id') ?? '';
     const href = $(el).attr('href') ?? '';
     const mediaType = $(el).attr('media-type') ?? '';
+    const properties = $(el).attr('properties') ?? undefined;
     if (!id || !href) return;
     const absPath = normalizePath(opfDir ? `${opfDir}/${href}` : href);
-    manifest.push({ id, href, mediaType, absPath });
+    manifest.push({ id, href, mediaType, absPath, properties });
   });
 
   // 3. Parse spine
@@ -237,11 +239,12 @@ async function buildChapters(
   });
 
   // Find TOC file
-  const tocItem = structure.manifest.find(m =>
-    m.mediaType === 'application/x-dtbncx+xml' ||
-    m.mediaType === 'application/xhtml+xml' && (m.href.includes('toc') || m.id === 'toc') ||
-    m.id === 'ncx'
-  );
+  // EPUB3: nav document has properties="nav"; EPUB2: NCX file
+  const tocItem =
+    structure.manifest.find(m => m.mediaType === 'application/x-dtbncx+xml') ??
+    structure.manifest.find(m => m.id === 'ncx') ??
+    structure.manifest.find(m => m.properties?.split(' ').includes('nav')) ??
+    structure.manifest.find(m => m.mediaType === 'application/xhtml+xml' && (m.href.toLowerCase().includes('toc') || m.id === 'toc' || m.id === 'nav'));
   const tocFile = tocItem ? zip.file(tocItem.absPath) : null;
 
   if (!tocFile) {
@@ -257,8 +260,22 @@ async function buildChapters(
 
   const links: Array<{ text: string; page: number }> = [];
 
-  // EPUB3 nav
-  $('nav a').each((_, el) => {
+  // EPUB3 nav — select only the TOC nav (epub:type="toc"), ignore page-list and landmarks.
+  // Use JS filter to avoid CSS namespace selector (css-select doesn't support ns|attr syntax).
+  const allNavs = $('nav');
+  const tocNav = allNavs.filter((_, el) => {
+    const t = $(el).attr('epub:type') ?? '';
+    return t === 'toc' || t.split(' ').includes('toc');
+  });
+  // Fallback: if no explicit epub:type="toc" found, use first nav (but not page-list/landmarks)
+  const targetNav = tocNav.length > 0
+    ? tocNav
+    : allNavs.filter((_, el) => {
+        const t = $(el).attr('epub:type') ?? '';
+        return !t.includes('page-list') && !t.includes('landmarks');
+      }).first();
+
+  targetNav.find('a').each((_, el) => {
     const href = ($(el).attr('href') ?? '').split('#')[0];
     const text = $(el).text().trim();
     const fname = href.split('/').pop()!;
