@@ -6,6 +6,7 @@
 
 import JSZip from 'jszip';
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 
 export interface ChapterEntry {
   title: string;
@@ -241,9 +242,9 @@ async function buildChapters(
   // Find TOC file
   // EPUB3: nav document has properties="nav"; EPUB2: NCX file
   const tocItem =
+    structure.manifest.find(m => m.properties?.split(' ').includes('nav')) ??
     structure.manifest.find(m => m.mediaType === 'application/x-dtbncx+xml') ??
     structure.manifest.find(m => m.id === 'ncx') ??
-    structure.manifest.find(m => m.properties?.split(' ').includes('nav')) ??
     structure.manifest.find(m => m.mediaType === 'application/xhtml+xml' && (m.href.toLowerCase().includes('toc') || m.id === 'toc' || m.id === 'nav'));
   const tocFile = tocItem ? zip.file(tocItem.absPath) : null;
 
@@ -278,7 +279,7 @@ async function buildChapters(
   // Walk nav <ol> manually — max 2 levels deep.
   // Level 1 = разделы, Level 2 = параграфы, Level 3+ = упражнения (skip).
   // This prevents 100-200 entry navs (every exercise listed) from exploding chapter count.
-  function walkOl(olEl: cheerio.Element, depth: number) {
+  function walkOl(olEl: Element, depth: number) {
     if (depth > 2) return;
     $(olEl).children('li').each((_, li) => {
       const a = $(li).children('a').first();
