@@ -200,7 +200,11 @@ export async function processChapter(
     emit({ type: 'chunk_done', msg: `Получено ${chunks.length} чанков`, data: { count: chunks.length } });
 
     if (!chunks.length) {
-      throw new Error('Ни одного чанка не получено — возможно ответ от AI пуст');
+      // No educational content (cover, section header, dictionary page, etc.) — skip gracefully.
+      // This is expected for front matter and divider pages; not an error.
+      emit({ type: 'chapter_done', msg: `⏭ Глава ${chapterIndex} пропущена — нет учебного контента (обложка/раздел/словарь)`, data: { chunks: 0 } });
+      await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'done', { chunksCount: 0, jobId: params.jobId });
+      return { chunks: 0, skipped: true };
     }
 
     // ── 4. Embed + Inject ──────────────────────────────────────────────────────
