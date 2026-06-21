@@ -3,15 +3,22 @@
  * Designed to run inside a single SSE request (≤ 300s on Vercel Pro).
  *
  * Emits structured events via a callback so the API route can stream them.
+ *
+ * EPUB extraction uses extractEpubContent() — adaptive per-page classification.
+ * Each page independently chooses text extraction or Vision OCR based on content.
+ * PDF extraction still uses isImageBased flag (separate PDF pipeline).
  */
 
-import { extractEpubImages, extractEpubText, type PageImage } from '@/lib/extract/epub';
+import { extractEpubContent, type PageImage } from '@/lib/extract/epub';
 import { extractPdfText, extractPdfImages } from '@/lib/extract/pdf';
 import { visionChunk } from '@/lib/ai/gemini';
 import { deepseekChunk, isStemSubject } from '@/lib/ai/deepseek';
 import { embedText } from '@/lib/ai/gemini';
 import { injectChunk, upsertChapterSession, getChapterSession } from '@/lib/supabase';
 import type { KarpathyChunk } from '@/lib/ai/deepseek';
+
+/** Minimum text length (chars) to treat extracted EPUB content as text-based. */
+const MIN_CHAPTER_TEXT = 300;
 
 /** Max image pages per Gemini Vision call — keeps inline_data request under limits. */
 const VISION_BATCH = 8;
@@ -86,64 +93,107 @@ export async function processChapter(
     let chunks: KarpathyChunk[] = [];
     const useStem = isStemSubject(subject);
 
-    if (params.isImageBased) {
-      // Image-based: render/extract page images (PDF via pdf-to-img, EPUB via assets)
-      const images: PageImage[] = params.fileType === 'epub'
-        ? await extractEpubImages(params.fileBuffer, params.pageStart, params.pageEnd)
-        : await extractPdfImages(params.fileBuffer, params.pageStart, params.pageEnd);
+    if (params.fileType === 'epub') {
+      // ── EPUB: adaptive per-page extraction — no pre-classification needed ──
+      const content = await extractEpubContent(params.fileBuffer, params.pageStart, params.pageEnd);
+      const summary = [
+        content.textPages > 0 ? `${content.textPages} текст.` : '',
+        content.imagePages > 0 ? `${content.imagePages} скан.` : '',
+        content.emptyPages > 0 ? `${content.emptyPages} пустых` : '',
+      ].filter(Boolean).join(', ');
 
-      if (!images.length) {
-        throw new Error(`Не найдено изображений для стр. ${params.pageStart}–${params.pageEnd}`);
-      }
+      if (content.text.length >= MIN_CHAPTER_TEXT) {
+        // Primary path: HTML text extraction (zero Vision API cost)
+        emit({ type: 'extract_done', msg: `Извлечено ${content.text.length} символов (${summary})` });
+        emit({ type: 'chunk_start', msg: useStem ? 'DeepSeek V4 Flash (точные науки)...' : 'Gemini 3.5-Flash (гуманитарные)...' });
 
-      const totalKB = Math.round(images.reduce((s, i) => s + i.data.length, 0) / 1024);
-      const batches = windows(images, VISION_BATCH);
-      emit({ type: 'extract_done', msg: `Извлечено ${images.length} изображений (${totalKB}KB, ${batches.length} батч(ей) Vision)` });
-
-      // ── 3. Chunk (Vision, sub-batched to respect Gemini inline limits) ──────
-      emit({ type: 'chunk_start', msg: useStem ? 'Vision OCR → DeepSeek V4 Pro (точные науки)...' : 'Gemini Vision OCR + Karpathy...' });
-
-      if (useStem) {
-        // STEM image-based: OCR each batch to text, then one DeepSeek chunking pass
-        let ocrText = '';
-        for (let b = 0; b < batches.length; b++) {
-          emit({ type: 'retrying', msg: `Vision OCR батч ${b + 1}/${batches.length}...` });
-          ocrText += (await extractTextViaVision(chapterTitle, batches[b])) + '\n\n';
-        }
-        chunks = await deepseekChunk(chapterTitle, ocrText.trim(), (msg) =>
-          emit({ type: 'retrying', msg })
-        );
-      } else {
-        // Humanities image-based: Vision chunk each batch, merge results
-        for (let b = 0; b < batches.length; b++) {
-          if (batches.length > 1) emit({ type: 'retrying', msg: `Vision батч ${b + 1}/${batches.length}...` });
-          const part = await visionChunk(chapterTitle, batches[b], (msg) =>
+        if (useStem) {
+          chunks = await deepseekChunk(chapterTitle, content.text, (msg) =>
             emit({ type: 'retrying', msg })
           );
-          chunks.push(...part);
+        } else {
+          chunks = await geminiTextChunk(chapterTitle, content.text, (msg) =>
+            emit({ type: 'retrying', msg })
+          );
         }
+
+      } else if (content.images.length > 0) {
+        // Fallback path: no text found, use Vision OCR on scan images
+        const totalKB = Math.round(content.images.reduce((s, i) => s + i.data.length, 0) / 1024);
+        const batches = windows(content.images, VISION_BATCH);
+        emit({ type: 'extract_done', msg: `Извлечено ${content.images.length} сканов (${totalKB}KB, ${batches.length} батч(ей) Vision) [${summary}]` });
+        emit({ type: 'chunk_start', msg: useStem ? 'Vision OCR → DeepSeek V4 Flash (точные науки)...' : 'Gemini Vision OCR + Karpathy...' });
+
+        if (useStem) {
+          let ocrText = '';
+          for (let b = 0; b < batches.length; b++) {
+            emit({ type: 'retrying', msg: `Vision OCR батч ${b + 1}/${batches.length}...` });
+            ocrText += (await extractTextViaVision(chapterTitle, batches[b])) + '\n\n';
+          }
+          chunks = await deepseekChunk(chapterTitle, ocrText.trim(), (msg) =>
+            emit({ type: 'retrying', msg })
+          );
+        } else {
+          for (let b = 0; b < batches.length; b++) {
+            if (batches.length > 1) emit({ type: 'retrying', msg: `Vision батч ${b + 1}/${batches.length}...` });
+            const part = await visionChunk(chapterTitle, batches[b], (msg) =>
+              emit({ type: 'retrying', msg })
+            );
+            chunks.push(...part);
+          }
+        }
+
+      } else {
+        throw new Error(`Нет контента для стр. ${params.pageStart}–${params.pageEnd} — ни текста, ни изображений`);
       }
 
     } else {
-      // Text-based: extract text
-      const rawText = params.fileType === 'epub'
-        ? await extractEpubText(params.fileBuffer, params.pageStart, params.pageEnd)
-        : await extractPdfText(params.fileBuffer, params.pageStart, params.pageEnd);
+      // ── PDF: use isImageBased flag (separate PDF pipeline unchanged) ────────
+      if (params.isImageBased) {
+        const images: PageImage[] = await extractPdfImages(params.fileBuffer, params.pageStart, params.pageEnd);
 
-      emit({ type: 'extract_done', msg: `Извлечено ${rawText.length} символов` });
+        if (!images.length) {
+          throw new Error(`Не найдено изображений для стр. ${params.pageStart}–${params.pageEnd}`);
+        }
 
-      // ── 3. Chunk (DeepSeek or Gemini) ─────────────────────────────────────
-      emit({ type: 'chunk_start', msg: useStem ? 'DeepSeek V4 Pro (точные науки)...' : 'Gemini 3.5-Flash (гуманитарные)...' });
+        const totalKB = Math.round(images.reduce((s, i) => s + i.data.length, 0) / 1024);
+        const batches = windows(images, VISION_BATCH);
+        emit({ type: 'extract_done', msg: `Извлечено ${images.length} изображений (${totalKB}KB, ${batches.length} батч(ей) Vision)` });
+        emit({ type: 'chunk_start', msg: useStem ? 'Vision OCR → DeepSeek V4 Flash (точные науки)...' : 'Gemini Vision OCR + Karpathy...' });
 
-      if (useStem) {
-        chunks = await deepseekChunk(chapterTitle, rawText, (msg) =>
-          emit({ type: 'retrying', msg })
-        );
+        if (useStem) {
+          let ocrText = '';
+          for (let b = 0; b < batches.length; b++) {
+            emit({ type: 'retrying', msg: `Vision OCR батч ${b + 1}/${batches.length}...` });
+            ocrText += (await extractTextViaVision(chapterTitle, batches[b])) + '\n\n';
+          }
+          chunks = await deepseekChunk(chapterTitle, ocrText.trim(), (msg) =>
+            emit({ type: 'retrying', msg })
+          );
+        } else {
+          for (let b = 0; b < batches.length; b++) {
+            if (batches.length > 1) emit({ type: 'retrying', msg: `Vision батч ${b + 1}/${batches.length}...` });
+            const part = await visionChunk(chapterTitle, batches[b], (msg) =>
+              emit({ type: 'retrying', msg })
+            );
+            chunks.push(...part);
+          }
+        }
+
       } else {
-        // Text-based humanities: use Gemini chat (no images)
-        chunks = await geminiTextChunk(chapterTitle, rawText, (msg) =>
-          emit({ type: 'retrying', msg })
-        );
+        const rawText = await extractPdfText(params.fileBuffer, params.pageStart, params.pageEnd);
+        emit({ type: 'extract_done', msg: `Извлечено ${rawText.length} символов` });
+        emit({ type: 'chunk_start', msg: useStem ? 'DeepSeek V4 Flash (точные науки)...' : 'Gemini 3.5-Flash (гуманитарные)...' });
+
+        if (useStem) {
+          chunks = await deepseekChunk(chapterTitle, rawText, (msg) =>
+            emit({ type: 'retrying', msg })
+          );
+        } else {
+          chunks = await geminiTextChunk(chapterTitle, rawText, (msg) =>
+            emit({ type: 'retrying', msg })
+          );
+        }
       }
     }
 
