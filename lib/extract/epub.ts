@@ -1,12 +1,21 @@
 /**
- * EPUB extractor — supports both image-based and text-based EPUBs.
- * Image-based: extracts page images via OPF manifest + spine (not filename guessing).
- * Text-based: extracts HTML → plain text via cheerio.
+ * EPUB extractor — supports text-based, image-based, and hybrid EPUBs.
+ *
+ * Primary API: extractEpubContent() — adaptive per-page extraction.
+ *   Each page is independently classified:
+ *   - HTML text ≥ MIN_TEXT_CHARS → text (fast, zero API cost)
+ *   - HTML text < threshold + has <img> → image (caller sends to Vision OCR)
+ *   - Neither → empty page (cover, separator) → silently skipped
+ *
+ * Legacy: extractEpubText() / extractEpubImages() kept for compatibility.
  */
 
 import JSZip from 'jszip';
 import * as cheerio from 'cheerio';
 import type { Element } from 'domhandler';
+
+/** Minimum characters to treat a page as text-based rather than a scan. */
+const MIN_TEXT_CHARS = 150;
 
 export interface ChapterEntry {
   title: string;
@@ -27,23 +36,39 @@ export interface PageImage {
   data: Buffer;
 }
 
+/**
+ * Result of adaptive per-page extraction.
+ * A single chapter may contain text pages, image pages, or both.
+ * Callers should process text first; use images only when text is absent.
+ */
+export interface EpubContent {
+  /** Concatenated plain text from pages that had sufficient HTML text. */
+  text: string;
+  /** Image data from pages that had no text but contained a scan <img>. */
+  images: PageImage[];
+  pageCount: number;
+  textPages: number;
+  imagePages: number;
+  /** Pages with neither text nor image (covers, separators) — silently skipped. */
+  emptyPages: number;
+}
+
 // ── OPF structure ─────────────────────────────────────────────────────────────
 
 interface ManifestItem {
   id: string;
   href: string;
   mediaType: string;
-  absPath: string; // resolved path inside zip
+  absPath: string;
   properties?: string;
 }
 
 interface EpubStructure {
   opfDir: string;
   manifest: ManifestItem[];
-  spineItems: ManifestItem[]; // in reading order
+  spineItems: ManifestItem[];
 }
 
-/** Resolve path segments including ../ */
 function normalizePath(rawPath: string): string {
   const parts = rawPath.split('/');
   const resolved: string[] = [];
@@ -54,9 +79,7 @@ function normalizePath(rawPath: string): string {
   return resolved.join('/');
 }
 
-/** Find container.xml → OPF path → parse manifest + spine. */
 async function parseOpf(zip: JSZip): Promise<EpubStructure> {
-  // 1. Find OPF path via container.xml
   let opfPath = 'OEBPS/content.opf';
   const containerFile = zip.file('META-INF/container.xml');
   if (containerFile) {
@@ -69,13 +92,11 @@ async function parseOpf(zip: JSZip): Promise<EpubStructure> {
   }
 
   const opfDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/')) : '';
-
   const opfFile = zip.file(opfPath);
   if (!opfFile) throw new Error(`OPF не найден: ${opfPath}`);
   const opfXml = await opfFile.async('string');
   const $ = cheerio.load(opfXml, { xmlMode: true });
 
-  // 2. Parse manifest
   const manifest: ManifestItem[] = [];
   $('item').each((_, el) => {
     const id = $(el).attr('id') ?? '';
@@ -87,7 +108,6 @@ async function parseOpf(zip: JSZip): Promise<EpubStructure> {
     manifest.push({ id, href, mediaType, absPath, properties });
   });
 
-  // 3. Parse spine
   const manifestById = new Map(manifest.map(m => [m.id, m]));
   const spineItems: ManifestItem[] = [];
   $('itemref').each((_, el) => {
@@ -99,9 +119,45 @@ async function parseOpf(zip: JSZip): Promise<EpubStructure> {
   return { opfDir, manifest, spineItems };
 }
 
+/** Build a filename → absPath lookup for image fallback resolution. */
+function buildImageIndex(manifest: ManifestItem[]): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const item of manifest) {
+    if (item.mediaType.startsWith('image/')) {
+      const fname = item.absPath.split('/').pop()!.toLowerCase();
+      index.set(fname, item.absPath);
+    }
+  }
+  return index;
+}
+
+async function resolveImage(
+  zip: JSZip,
+  imgSrc: string,
+  xhtmlAbsPath: string,
+  imageIndex: Map<string, string>
+): Promise<{ data: Buffer; mimeType: string } | null> {
+  const xhtmlDir = xhtmlAbsPath.includes('/')
+    ? xhtmlAbsPath.substring(0, xhtmlAbsPath.lastIndexOf('/'))
+    : '';
+  const resolvedPath = normalizePath(xhtmlDir ? `${xhtmlDir}/${imgSrc}` : imgSrc);
+
+  let imgFile = zip.file(resolvedPath);
+  if (!imgFile) {
+    const fname = imgSrc.split('/').pop()!.toLowerCase();
+    const fallbackPath = imageIndex.get(fname);
+    if (fallbackPath) imgFile = zip.file(fallbackPath);
+  }
+  if (!imgFile) return null;
+
+  const data = Buffer.from(await imgFile.async('arraybuffer'));
+  const isPng = imgFile.name.toLowerCase().endsWith('.png');
+  return { data, mimeType: isPng ? 'image/png' : 'image/jpeg' };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/** Parse EPUB TOC and detect if it's image-based. */
+/** Parse EPUB TOC and metadata. isImageBased is now informational only. */
 export async function parseEpub(buffer: Buffer): Promise<EpubMeta> {
   const zip = await JSZip.loadAsync(buffer);
   const structure = await parseOpf(zip);
@@ -110,7 +166,6 @@ export async function parseEpub(buffer: Buffer): Promise<EpubMeta> {
   const totalPages = structure.spineItems.length;
   const chapters = await buildChapters(zip, structure, totalPages);
 
-  // Book title
   const opfPath = Object.keys(zip.files).find(f => f.endsWith('.opf')) ?? '';
   let title = 'Untitled';
   if (opfPath) {
@@ -123,72 +178,70 @@ export async function parseEpub(buffer: Buffer): Promise<EpubMeta> {
 }
 
 /**
- * Extract page images for a chapter (image-based EPUB).
- * Uses spine order: spine[pg-1] = page pg.
- * Reads <img src="..."> from XHTML and resolves via manifest — no filename guessing.
+ * Adaptive per-page extraction — handles any EPUB type without pre-classification.
+ *
+ * For each spine page in [pageStart, pageEnd]:
+ *   1. Extract HTML text (strip scripts/style/nav).
+ *   2. If text ≥ MIN_TEXT_CHARS → append to text output.
+ *   3. Else if page contains <img> → resolve image and add to images output.
+ *   4. Else → empty page (cover, separator) → skip silently.
  */
-export async function extractEpubImages(
+export async function extractEpubContent(
   buffer: Buffer,
   pageStart: number,
   pageEnd: number
-): Promise<PageImage[]> {
+): Promise<EpubContent> {
   const zip = await JSZip.loadAsync(buffer);
   const structure = await parseOpf(zip);
+  const imageIndex = buildImageIndex(structure.manifest);
 
-  // Filename → absPath index for fallback
-  const fileNameIndex = new Map<string, string>();
-  for (const item of structure.manifest) {
-    if (item.mediaType.startsWith('image/')) {
-      const fname = item.absPath.split('/').pop()!.toLowerCase();
-      fileNameIndex.set(fname, item.absPath);
-    }
-  }
-
+  let text = '';
   const images: PageImage[] = [];
+  let textPages = 0;
+  let imagePages = 0;
+  let emptyPages = 0;
 
   for (let pg = pageStart; pg <= pageEnd; pg++) {
     const spineItem = structure.spineItems[pg - 1];
     if (!spineItem) continue;
+    const file = zip.file(spineItem.absPath);
+    if (!file) continue;
 
-    const xhtmlFile = zip.file(spineItem.absPath);
-    if (!xhtmlFile) continue;
+    const html = await file.async('string');
+    const $ = cheerio.load(html);
+    $('script, style, nav').remove();
+    const pageText = $('body').text().replace(/\s+/g, ' ').trim();
 
-    const html = await xhtmlFile.async('string');
-    const $ = cheerio.load(html, { xmlMode: false });
+    if (pageText.length >= MIN_TEXT_CHARS) {
+      text += pageText + '\n\n';
+      textPages++;
+      continue;
+    }
 
-    // Find first image reference in the page
     const imgSrc = $('img').first().attr('src')
       ?? $('image').first().attr('xlink:href')
       ?? $('image').first().attr('href')
       ?? '';
 
-    if (!imgSrc) continue;
-
-    // Resolve relative to the XHTML file's directory
-    const xhtmlDir = spineItem.absPath.includes('/')
-      ? spineItem.absPath.substring(0, spineItem.absPath.lastIndexOf('/'))
-      : '';
-    const resolvedPath = normalizePath(xhtmlDir ? `${xhtmlDir}/${imgSrc}` : imgSrc);
-
-    // Try resolved path, then filename-only fallback
-    let imgFile = zip.file(resolvedPath);
-    if (!imgFile) {
-      const fname = imgSrc.split('/').pop()!.toLowerCase();
-      const fallbackPath = fileNameIndex.get(fname);
-      if (fallbackPath) imgFile = zip.file(fallbackPath);
+    if (imgSrc) {
+      const img = await resolveImage(zip, imgSrc, spineItem.absPath, imageIndex);
+      if (img) {
+        images.push({ pageNum: pg, ...img });
+        imagePages++;
+        continue;
+      }
     }
 
-    if (!imgFile) continue;
-
-    const data = Buffer.from(await imgFile.async('arraybuffer'));
-    const isPng = imgFile.name.toLowerCase().endsWith('.png');
-    images.push({ pageNum: pg, mimeType: isPng ? 'image/png' : 'image/jpeg', data });
+    emptyPages++;
   }
 
-  return images;
+  return { text: text.trim(), images, pageCount: pageEnd - pageStart + 1, textPages, imagePages, emptyPages };
 }
 
-/** Extract text from a chapter (text-based EPUB). Uses spine order. */
+/**
+ * Extract text from a chapter (text-based EPUB).
+ * @deprecated Prefer extractEpubContent() for correct hybrid book handling.
+ */
 export async function extractEpubText(
   buffer: Buffer,
   pageStart: number,
@@ -212,18 +265,77 @@ export async function extractEpubText(
   return text.trim();
 }
 
+/**
+ * Extract page images for a chapter (image-based EPUB).
+ * @deprecated Prefer extractEpubContent() for correct hybrid book handling.
+ */
+export async function extractEpubImages(
+  buffer: Buffer,
+  pageStart: number,
+  pageEnd: number
+): Promise<PageImage[]> {
+  const zip = await JSZip.loadAsync(buffer);
+  const structure = await parseOpf(zip);
+  const imageIndex = buildImageIndex(structure.manifest);
+  const images: PageImage[] = [];
+
+  for (let pg = pageStart; pg <= pageEnd; pg++) {
+    const spineItem = structure.spineItems[pg - 1];
+    if (!spineItem) continue;
+    const xhtmlFile = zip.file(spineItem.absPath);
+    if (!xhtmlFile) continue;
+
+    const html = await xhtmlFile.async('string');
+    const $ = cheerio.load(html, { xmlMode: false });
+    const imgSrc = $('img').first().attr('src')
+      ?? $('image').first().attr('xlink:href')
+      ?? $('image').first().attr('href')
+      ?? '';
+    if (!imgSrc) continue;
+
+    const img = await resolveImage(zip, imgSrc, spineItem.absPath, imageIndex);
+    if (img) images.push({ pageNum: pg, ...img });
+  }
+
+  return images;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/**
+ * Classify book as image-based by sampling content pages (not covers).
+ * Skips first 3 spine items, samples up to 10 content pages.
+ * Returns true only if >60% of sampled pages have no text (genuine scans).
+ * This is now informational — extraction does not depend on this flag.
+ */
 async function detectImageBased(zip: JSZip, structure: EpubStructure): Promise<boolean> {
-  for (const item of structure.spineItems.slice(0, 5)) {
+  const total = structure.spineItems.length;
+  if (total === 0) return false;
+
+  const startIdx = Math.min(3, total - 1);
+  const sample = structure.spineItems.slice(startIdx, startIdx + 10);
+
+  let textPages = 0;
+  let imageOnlyPages = 0;
+
+  for (const item of sample) {
     const file = zip.file(item.absPath);
     if (!file) continue;
     const html = await file.async('string');
     const $ = cheerio.load(html);
-    const bodyText = $('body').text().trim();
-    if ($('img, image').length > 0 && bodyText.length < 30) return true;
+    $('script, style, nav').remove();
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+
+    if (bodyText.length >= MIN_TEXT_CHARS) {
+      textPages++;
+    } else if ($('img, image').length > 0) {
+      imageOnlyPages++;
+    }
   }
-  return false;
+
+  const checked = textPages + imageOnlyPages;
+  if (checked === 0) return false;
+  return imageOnlyPages / checked > 0.6;
 }
 
 async function buildChapters(
@@ -231,7 +343,6 @@ async function buildChapters(
   structure: EpubStructure,
   totalPages: number
 ): Promise<ChapterEntry[]> {
-  // Spine index: filename or absPath → 1-based page number
   const hrefToPage = new Map<string, number>();
   structure.spineItems.forEach((item, i) => {
     hrefToPage.set(item.absPath, i + 1);
@@ -239,8 +350,7 @@ async function buildChapters(
     hrefToPage.set(item.absPath.split('/').pop()!, i + 1);
   });
 
-  // Find TOC file
-  // EPUB3: nav document has properties="nav"; EPUB2: NCX file
+  // EPUB3 nav first, NCX as fallback
   const tocItem =
     structure.manifest.find(m => m.properties?.split(' ').includes('nav')) ??
     structure.manifest.find(m => m.mediaType === 'application/x-dtbncx+xml') ??
@@ -258,17 +368,13 @@ async function buildChapters(
 
   const tocContent = await tocFile.async('string');
   const $ = cheerio.load(tocContent, { xmlMode: false });
-
   const links: Array<{ text: string; page: number }> = [];
 
-  // EPUB3 nav — select only the TOC nav (epub:type="toc"), ignore page-list and landmarks.
-  // Use JS filter to avoid CSS namespace selector (css-select doesn't support ns|attr syntax).
   const allNavs = $('nav');
   const tocNav = allNavs.filter((_, el) => {
     const t = $(el).attr('epub:type') ?? '';
     return t === 'toc' || t.split(' ').includes('toc');
   });
-  // Fallback: if no explicit epub:type="toc" found, use first nav (but not page-list/landmarks)
   const targetNav = tocNav.length > 0
     ? tocNav
     : allNavs.filter((_, el) => {
@@ -276,9 +382,6 @@ async function buildChapters(
         return !t.includes('page-list') && !t.includes('landmarks');
       }).first();
 
-  // Walk nav <ol> manually — max 2 levels deep.
-  // Level 1 = разделы, Level 2 = параграфы, Level 3+ = упражнения (skip).
-  // This prevents 100-200 entry navs (every exercise listed) from exploding chapter count.
   function walkOl(olEl: Element, depth: number) {
     if (depth > 2) return;
     $(olEl).children('li').each((_, li) => {
@@ -298,7 +401,6 @@ async function buildChapters(
   if (rootOl) {
     walkOl(rootOl, 1);
   } else {
-    // Flat fallback: nav has no <ol> wrapper
     targetNav.find('a').each((_, el) => {
       const href = ($(el).attr('href') ?? '').split('#')[0];
       const text = $(el).text().trim();
@@ -308,7 +410,6 @@ async function buildChapters(
     });
   }
 
-  // EPUB2 NCX fallback
   if (!links.length) {
     $('navPoint').each((_, el) => {
       const href = ($(el).find('content').attr('src') ?? '').split('#')[0];
