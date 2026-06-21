@@ -144,7 +144,10 @@ export async function processChapter(
         }
 
       } else {
-        throw new Error(`Нет контента для стр. ${params.pageStart}–${params.pageEnd} — ни текста, ни изображений`);
+        // No text and no images — cover, section divider, or blank page. Skip gracefully.
+        emit({ type: 'chapter_done', msg: `⏭ Глава ${chapterIndex} пропущена — пустая страница (обложка/разделитель)`, data: { chunks: 0 } });
+        await upsertChapterSession(bookName, subject, chapterTitle, chapterIndex, 'done', { chunksCount: 0, jobId: params.jobId });
+        return { chunks: 0, skipped: true };
       }
 
     } else {
